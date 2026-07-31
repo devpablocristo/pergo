@@ -5,9 +5,9 @@ milestone_name: Email Channels & Tracking Engine
 current_phase: 28
 status: Milestone v1.5 complete
 stopped_at: Phase 28, Plan 02 executed
-last_updated: "2026-07-24T08:47:00.000Z"
-last_activity: 2026-07-24
-last_activity_desc: Milestone v1.5 completed (Email Channels & Tracking Engine)
+last_updated: "2026-07-31T09:10:39-03:00"
+last_activity: 2026-07-31
+last_activity_desc: "Completed quick task 260731-atf: opt-in local WhatsApp mock channel"
 progress:
   total_phases: 3
   completed_phases: 3
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-06-25)
 Phase: Milestone v1.4 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-07-20 — Milestone v1.4 completed and archived
+Last activity: 2026-07-31 — Completed quick task 260731-atf: opt-in local WhatsApp mock channel
 
 ## Performance Metrics
 
@@ -164,6 +164,7 @@ Items acknowledged and carried forward from previous milestone close:
 | 260716-upv | 2026-07-17 | implement-mcp-server | complete ✓ |
 | 260716-v4e | 2026-07-17 | quando-um-usuario-tenta-enviar-uma-mensa | complete ✓ |
 | 260720-fs6 | 2026-07-20 | fix 25-01-PLAN.md frontmatter traceability gap | complete ✓ |
+| 260731-atf | 2026-07-31 | add-an-opt-in-local-whatsapp-mock-channel | complete ✓ |
 
 ## Session Continuity
 

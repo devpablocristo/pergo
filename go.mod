@@ -1,6 +1,6 @@
 module github.com/pablojhp.pergo
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/a-h/templ v0.3.1020
@@ -17,8 +17,9 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.34.0
 	go.mau.fi/whatsmeow v0.0.0-20260622185415-5f04eac6dbbb
 	golang.org/x/net v0.56.0
-	golang.org/x/text v0.38.0
+	golang.org/x/text v0.39.0
 	golang.org/x/time v0.14.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -93,7 +94,6 @@ require (
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 

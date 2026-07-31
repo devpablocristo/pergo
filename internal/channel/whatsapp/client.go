@@ -132,15 +132,20 @@ func (wc *WhatsAppClient) setupEventHandlers() {
 
 // Run connects the client and blocks until ctx is cancelled.
 func (wc *WhatsAppClient) Run(ctx context.Context) error {
-	if err := wc.client.Connect(); err != nil {
+	if err := wc.Connect(); err != nil {
 		return fmt.Errorf("whatsapp connect: %w", err)
 	}
 
 	wc.log.Info("whatsapp: client running", "jid", wc.jid.String())
-	<-ctx.Done()
-
-	wc.client.Disconnect()
+	wc.Wait(ctx)
 	return nil
+}
+
+// Wait blocks until ctx is cancelled, then disconnects the client.
+// It is used after a synchronous Connect when restoring persisted sessions.
+func (wc *WhatsAppClient) Wait(ctx context.Context) {
+	<-ctx.Done()
+	wc.Disconnect()
 }
 
 // GetQRChannel returns the QR code channel for pairing a new device.

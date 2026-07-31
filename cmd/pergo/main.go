@@ -690,6 +690,13 @@ func main() {
 		return srv.Shutdown(ctx)
 	})
 
+	// Restore persisted WhatsApp Web sessions without delaying HTTP readiness.
+	go func() {
+		if err := sessionManager.ReconnectAll(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("failed to restore WhatsApp sessions", "error", err)
+		}
+	}()
+
 	go func() {
 		slog.Info("starting server", "port", cfg.ServerPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

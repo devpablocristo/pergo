@@ -13,6 +13,8 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	waEvents "go.mau.fi/whatsmeow/types/events"
 
+	"github.com/google/uuid"
+
 	"github.com/pablojhp.pergo/internal/channel"
 	whatsapp "github.com/pablojhp.pergo/internal/channel/whatsapp"
 	"github.com/pablojhp.pergo/internal/inbound"
@@ -35,12 +37,22 @@ const (
 // session registration, and graceful shutdown.
 type Manager struct {
 	db               *sql.DB
-	repo             *repository.ConnectionRepository
+	repo             connectionStore
 	registry         *ActiveSession
 	dispatchers      *channel.Registry
 	waVersion        string
 	inboundProcessor *inbound.InboundProcessor
-	mu               sync.Mutex
+	reconnect        func(context.Context, *repository.Connection) error
+	wait             func(context.Context, time.Duration) bool
+	initialJitter    func() time.Duration
+}
+
+type connectionStore interface {
+	Create(context.Context, *repository.Connection) error
+	GetByID(context.Context, uuid.UUID) (*repository.Connection, error)
+	ListAll(context.Context) ([]*repository.Connection, error)
+	ListByWorkspace(context.Context, uuid.UUID) ([]*repository.Connection, error)
+	UpdateStatus(context.Context, uuid.UUID, string) error
 }
 
 // NewManager creates a session manager.
@@ -52,7 +64,7 @@ func NewManager(
 	waVersion string,
 	inboundProcessor *inbound.InboundProcessor,
 ) *Manager {
-	return &Manager{
+	m := &Manager{
 		db:               db,
 		repo:             repo,
 		registry:         registry,
@@ -60,6 +72,12 @@ func NewManager(
 		waVersion:        waVersion,
 		inboundProcessor: inboundProcessor,
 	}
+	m.reconnect = m.reconnectDevice
+	m.wait = waitForReconnect
+	m.initialJitter = func() time.Duration {
+		return time.Duration(rand.Int64N(int64(defaultReconnectBackoff)))
+	}
+	return m
 }
 
 // ReconnectAll reconnects all known devices from the database with
@@ -73,7 +91,8 @@ func (m *Manager) ReconnectAll(ctx context.Context) error {
 
 	var devices []*repository.Connection
 	for _, conn := range allConns {
-		if conn.Channel == "whatsapp" && conn.JID != nil && *conn.JID != "" {
+		jid, parseErr := parseJID(derefJID(conn.JID))
+		if conn.Channel == "whatsapp" && parseErr == nil && !jid.IsEmpty() && conn.Status != string(DeviceStatusTerminal) && m.registry.Get(jid) == nil {
 			devices = append(devices, conn)
 		}
 	}
@@ -85,37 +104,33 @@ func (m *Manager) ReconnectAll(ctx context.Context) error {
 	var wg sync.WaitGroup
 
 	for _, d := range devices {
-		if d.Status == string(DeviceStatusTerminal) {
-			slog.Warn("session manager: skipping terminal device",
-				"device_id", d.ID,
-				"jid", *d.JID,
-			)
-			continue
-		}
-
 		wg.Add(1)
 		go func(d *repository.Connection) {
 			defer wg.Done()
-
-			// Add jitter to prevent thundering herd
-			jitter := time.Duration(rand.Int64N(int64(defaultReconnectBackoff)))
-			select {
-			case <-time.After(jitter):
-			case <-ctx.Done():
+			if !m.wait(ctx, m.initialJitter()) {
 				return
 			}
 
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			if err := m.reconnectDevice(ctx, d); err != nil {
+			for attempt := 0; ctx.Err() == nil; attempt++ {
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				err := m.reconnect(ctx, d)
+				<-sem
+				if err == nil {
+					return
+				}
 				slog.Error("session manager: failed to reconnect device",
 					"error", err,
 					"device_id", d.ID,
 					"jid", *d.JID,
 				)
-				// Update status to disconnected on failure
 				_ = m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusDisconnected))
+				if !m.wait(ctx, calcBackoff(attempt)) {
+					return
+				}
 			}
 		}(d)
 	}
@@ -155,7 +170,15 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 	}
 	wc.SetJID(jid)
 
-	// Create session with cancelable context
+	if m.registry.Get(jid) != nil {
+		return nil
+	}
+
+	if err := wc.Connect(); err != nil {
+		return fmt.Errorf("connect whatsapp client: %w", err)
+	}
+
+	// Create session with cancelable context only after a successful connection.
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	sess := &Session{
@@ -285,21 +308,40 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 		}
 	})
 
-	// Start the client goroutine
+	if err := m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusConnected)); err != nil {
+		cancel()
+		wc.Disconnect()
+		m.registry.Remove(jid)
+		return fmt.Errorf("mark device connected: %w", err)
+	}
+
+	// Wait for shutdown in a dedicated goroutine.
 	go func() {
-		if err := wc.Run(sessionCtx); err != nil && sessionCtx.Err() == nil {
-			slog.Error("session manager: device run error",
-				"error", err,
-				"jid", jid.String(),
-			)
-		}
+		wc.Wait(sessionCtx)
 		// Update status when goroutine exits
 		_ = m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusDisconnected))
 		m.registry.Remove(jid)
 	}()
 
-	// Update status to connected
-	return m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusConnected))
+	return nil
+}
+
+func waitForReconnect(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func derefJID(jid *string) string {
+	if jid == nil {
+		return ""
+	}
+	return *jid
 }
 
 // parseJID is a helper that parses a JID string.
@@ -352,6 +394,3 @@ func extractWhatsAppBody(v *waEvents.Message) string {
 	}
 	return ""
 }
-
-
-

@@ -30,6 +30,11 @@ Abaixo está o mapeamento detalhado das variáveis de ambiente disponíveis.
 * **Padrão:** `http://localhost:8080`
 * **Exemplo de Produção:** `https://api.pergo.app`
 
+### `PERGO_WHATSAPP_MOCK_ENABLED`
+* **Descrição:** Habilita o canal local `whatsapp_mock` para testar a API, o JetStream, os workers e a auditoria sem acessar WhatsApp, Meta ou qualquer conta externa.
+* **Padrão:** `false`
+* **Ativação:** apenas o valor exato `true` habilita o canal. Mantenha desabilitado em produção.
+
 ---
 
 ## Segurança e Painel Administrativo
@@ -78,6 +83,7 @@ Abaixo está o mapeamento unificado de todas as variáveis de ambiente aceitas p
 | `PERGO_ADMIN_PASSWORD` | - | `pergo-dev-2026` | Não | Senha de acesso para a console de gerenciamento `/admin`. |
 | `PERGO_SESSION_SECRET` | - | *Gerado aleatoriamente* | Não | Chave secreta de sessão de cookie (usada no login). Se vazia, os logins expiram a cada reinício de processo. |
 | `PERGO_MAX_WHATSAPP_CONNECTIONS` | - | `5` | Não | Limite de conexões ativas de WhatsApp Web (whatsmeow) simultâneas permitidas por workspace. |
+| `PERGO_WHATSAPP_MOCK_ENABLED` | - | `false` | Não | Habilita explicitamente o simulador local `whatsapp_mock`, sem tráfego para provedores externos. |
 | `PERGO_S3_ENDPOINT` | `S3_ENDPOINT` | `""` | Não | Endpoint personalizado do servidor S3 (ex: AWS, MinIO, Cloudflare R2). |
 | `PERGO_S3_BUCKET` | `S3_BUCKET` | `""` | Não | Nome do Bucket no storage S3. |
 | `PERGO_S3_ACCESS_KEY` | `S3_ACCESS_KEY` | `""` | Não | Access Key ID para o bucket S3. |
@@ -93,20 +99,21 @@ No código fonte, a configuração é carregada do ambiente no início da aplica
 
 ```go
 type Config struct {
-	DatabaseURL    string
-	NATSUrl        string
-	ServerPort     string
-	DebugPort      string
-	KEKBase64      string
-	KEKBytes       []byte // Decodificado de KEKBase64
-	AdminPassword  string
-	S3Endpoint     string
-	S3Bucket       string
-	S3AccessKey    string
-	S3SecretKey    string
-	S3Region       string
-	S3UsePathStyle bool
-	ExternalURL    string
+	DatabaseURL         string
+	NATSUrl             string
+	ServerPort          string
+	DebugPort           string
+	KEKBase64           string
+	KEKBytes            []byte // Decodificado de KEKBase64
+	AdminPassword       string
+	S3Endpoint          string
+	S3Bucket            string
+	S3AccessKey         string
+	S3SecretKey         string
+	S3Region            string
+	S3UsePathStyle      bool
+	ExternalURL         string
+	WhatsAppMockEnabled bool
 }
 ```
 
@@ -130,6 +137,7 @@ Outras variáveis especiais também são acessadas de maneira pontual na inicial
 * **Segurança de Cookies (`PERGO_SESSION_SECRET`)**: Caso não seja fornecida, o sistema gerará uma chave de 32 bytes randômica a cada inicialização da aplicação. No entanto, isso fará com que qualquer administrador autenticado na console seja desconectado toda vez que o servidor for reiniciado. Recomendado definir para ambientes de produção estáveis.
 * **Porta do Servidor (`PERGO_SERVER_PORT` e `PERGO_DEBUG_PORT`)**: Porta principal por padrão escuta na `8080`, e a de debug/profile na `6060`.
 * **Limite de WhatsApp Web (`PERGO_MAX_WHATSAPP_CONNECTIONS`)**: Limita a quantidade de conexões ativas via WhatsApp Web utilizando whatsmeow por workspace (padrão `5`). Se ultrapassado, tentativas de emparelhamento de QR Code adicionais serão rejeitadas.
+* **Simulador local (`PERGO_WHATSAPP_MOCK_ENABLED`)**: Permanece desabilitado por padrão. Defina como `true` apenas em desenvolvimento ou testes para disponibilizar um canal sem credenciais e sem acesso ao WhatsApp/Meta.
 
 ---
 

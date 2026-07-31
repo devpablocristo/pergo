@@ -20,21 +20,34 @@ import (
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
 	"github.com/pablojhp.pergo/internal/domain"
-	"github.com/pablojhp.pergo/internal/platform/queue"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/session"
 	"github.com/pablojhp.pergo/templates/pages"
 )
 
+// DeviceConnectionStore is the narrow persistence contract used by DeviceHandler.
+type DeviceConnectionStore interface {
+	ListByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]*repository.Connection, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*repository.Connection, error)
+	Create(ctx context.Context, connection *repository.Connection) error
+	Delete(ctx context.Context, id uuid.UUID) error
+}
+
+// DevicePublisher is the narrow queue contract used by DeviceHandler.
+type DevicePublisher interface {
+	Publish(ctx context.Context, subject string, data []byte, traceID string) error
+}
+
 // DeviceHandler handles admin operations for unified connections management.
 type DeviceHandler struct {
-	Sessions      *session.ActiveSession
-	Manager       *session.Manager
-	Connections   *repository.ConnectionRepository
-	Publisher     *queue.JetStreamPublisher
-	NC            *nats.Conn
-	TemplatesRepo *repository.WABATemplateRepository
-	ExternalURL   string
+	Sessions            *session.ActiveSession
+	Manager             *session.Manager
+	Connections         DeviceConnectionStore
+	Publisher           DevicePublisher
+	NC                  *nats.Conn
+	TemplatesRepo       *repository.WABATemplateRepository
+	ExternalURL         string
+	WhatsAppMockEnabled bool
 }
 
 // pairingState holds the current QR pairing state for a phone number.
@@ -69,7 +82,7 @@ func (h *DeviceHandler) List(c *echo.Context) error {
 // PairForm renders the unified new connection modal fragment.
 // GET /admin/devices/pair-form
 func (h *DeviceHandler) PairForm(c *echo.Context) error {
-	return mw.Render(c, http.StatusOK, pages.PairForm())
+	return mw.Render(c, http.StatusOK, pages.PairForm(h.WhatsAppMockEnabled))
 }
 
 // StartPairing begins the QR pairing flow for a new WhatsApp Web connection.
@@ -211,7 +224,7 @@ func (h *DeviceHandler) Disconnect(c *echo.Context) error {
 	return mw.Render(c, http.StatusOK, pages.ConnectionTable(connections))
 }
 
-// Create handles creation of Telegram and WABA connections.
+// Create handles synchronous creation of Telegram, WABA, and local mock connections.
 // POST /admin/devices/create
 func (h *DeviceHandler) Create(c *echo.Context) error {
 	ctx := c.Request().Context()
@@ -233,7 +246,13 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 	var connID uuid.UUID
 	var wabaCfg pages.WABAConfig
 
-	if channel == "telegram" {
+	if channel == "whatsapp_mock" {
+		if !h.WhatsAppMockEnabled {
+			return c.String(http.StatusForbidden, "WhatsApp mock channel is disabled")
+		}
+		connID = uuid.New()
+		senderIdentity = "whatsapp-mock:" + connID.String()
+	} else if channel == "telegram" {
 		token := c.FormValue("token")
 		if token == "" {
 			return c.String(http.StatusBadRequest, "token is required for Telegram bot")
@@ -311,6 +330,7 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 		Channel:        channel,
 		SenderIdentity: senderIdentity,
 		Status:         "connected",
+		IsDefault:      channel == "whatsapp_mock",
 		Credentials:    credentialsJSON,
 		ConnectedSince: &now,
 	}
@@ -393,6 +413,9 @@ func (h *DeviceHandler) RunTest(c *echo.Context) error {
 	conn, err := h.Connections.GetByID(c.Request().Context(), connID)
 	if err != nil {
 		return c.HTML(http.StatusOK, `<div class="p-3 bg-red-50 text-red-800 border border-red-200 rounded-md text-sm mb-4">Conexão não encontrada</div>`)
+	}
+	if conn.Channel == "whatsapp_mock" && !h.WhatsAppMockEnabled {
+		return c.HTML(http.StatusForbidden, `<div class="p-3 bg-red-50 text-red-800 border border-red-200 rounded-md text-sm mb-4">WhatsApp Mock está desabilitado neste servidor</div>`)
 	}
 
 	var componentsList []domain.TemplateComponent

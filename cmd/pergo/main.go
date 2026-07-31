@@ -563,13 +563,14 @@ func main() {
 
 	// Device/Connection management routes
 	deviceHandler := &admin.DeviceHandler{
-		Sessions:      sessionRegistry,
-		Manager:       sessionManager,
-		Connections:   connectionRepo,
-		Publisher:     publisher,
-		NC:            nc,
-		TemplatesRepo: wabaTemplateRepo,
-		ExternalURL:   cfg.ExternalURL,
+		Sessions:            sessionRegistry,
+		Manager:             sessionManager,
+		Connections:         connectionRepo,
+		Publisher:           publisher,
+		NC:                  nc,
+		TemplatesRepo:       wabaTemplateRepo,
+		ExternalURL:         cfg.ExternalURL,
+		WhatsAppMockEnabled: cfg.WhatsAppMockEnabled,
 	}
 	adminGroup.GET("/devices", deviceHandler.List)
 	adminGroup.GET("/connections", deviceHandler.List)

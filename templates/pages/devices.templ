@@ -122,6 +122,10 @@ templ ChannelIcon(channel string) {
 			<span class="badge badge-sm bg-green-50 text-green-700 border-green-200 px-2 py-0.5 text-xs font-semibold">
 				WhatsApp Cloud
 			</span>
+		case "whatsapp_mock":
+			<span class="badge badge-sm bg-violet-50 text-violet-700 border-violet-200 px-2 py-0.5 text-xs font-semibold">
+				WhatsApp Mock (Local)
+			</span>
 		case "telegram":
 			<span class="badge badge-sm bg-sky-50 text-sky-700 border-sky-200 px-2 py-0.5 text-xs font-semibold">
 				Telegram
@@ -150,7 +154,7 @@ templ ConnectionStatusBadge(status string) {
 }
 
 // PairForm renders the unified new connection modal form.
-templ PairForm() {
+templ PairForm(whatsappMockEnabled bool) {
 	<div class="modal-backdrop" onclick="this.closest('.modal-backdrop').remove()">
 		<div class="custom-modal w-full max-w-lg" onclick="event.stopPropagation()">
 			<div class="modal-header border-b pb-3 mb-4">
@@ -169,6 +173,9 @@ templ PairForm() {
 						<select id="new-channel-select" name="channel" required class="form-input border border-zinc-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-950 focus:border-transparent bg-white w-full" onchange="updateChannelFields()">
 							<option value="whatsapp">WhatsApp Web (Unofficial)</option>
 							<option value="whatsapp_cloud">WhatsApp Cloud (WABA)</option>
+							if whatsappMockEnabled {
+								<option value="whatsapp_mock">WhatsApp Mock (Local)</option>
+							}
 							<option value="telegram">Telegram Bot</option>
 						</select>
 					</div>
@@ -214,6 +221,14 @@ templ PairForm() {
 						</div>
 					</div>
 
+					if whatsappMockEnabled {
+						<!-- WhatsApp Mock Fields -->
+						<div id="fields-whatsapp-mock" style="display: none;" class="space-y-3 rounded-md border border-violet-200 bg-violet-50 p-4 text-sm text-violet-900">
+							<p class="font-semibold">Simulador local sem credenciais</p>
+							<p>As mensagens percorrem a API, o NATS e os workers do PerGo, mas não acessam WhatsApp, Meta nem qualquer conta externa.</p>
+						</div>
+					}
+
 					<div id="qr-area" class="qr-area mt-4"></div>
 
 					<div class="modal-footer pt-4 border-t border-zinc-200 flex justify-end gap-2 mt-6">
@@ -232,12 +247,14 @@ templ PairForm() {
 					const waWebFields = document.getElementById('fields-whatsapp');
 					const wabaFields = document.getElementById('fields-waba');
 					const tgFields = document.getElementById('fields-telegram');
+					const mockFields = document.getElementById('fields-whatsapp-mock');
 					const submitBtn = document.getElementById('new-conn-submit-btn');
 
 					// Hide everything
 					waWebFields.style.display = 'none';
 					wabaFields.style.display = 'none';
 					tgFields.style.display = 'none';
+					if (mockFields) mockFields.style.display = 'none';
 
 					// Disable required for all dynamic fields
 					wabaFields.querySelectorAll('input').forEach(i => i.required = false);
@@ -267,6 +284,14 @@ templ PairForm() {
 						tgFields.querySelectorAll('input[data-required="true"]').forEach(i => i.required = true);
 						
 						submitBtn.innerText = 'Salvar Conexão';
+						submitBtn.setAttribute('hx-post', '/admin/devices/create');
+						submitBtn.setAttribute('hx-target', '#connections-table-container');
+						submitBtn.setAttribute('hx-swap', 'innerHTML');
+						htmx.process(submitBtn);
+					} else if (channel === 'whatsapp_mock' && mockFields) {
+						mockFields.style.display = 'block';
+
+						submitBtn.innerText = 'Criar Simulador Local';
 						submitBtn.setAttribute('hx-post', '/admin/devices/create');
 						submitBtn.setAttribute('hx-target', '#connections-table-container');
 						submitBtn.setAttribute('hx-swap', 'innerHTML');

@@ -69,7 +69,7 @@ func (r *ContactRepository) ResolveContact(
 		SELECT contact_id FROM contact_identities 
 		WHERE workspace_id = $1 AND channel = $2 AND sender_identity = $3
 	`, workspaceID, channel, senderIdentity).Scan(&contactID)
-	
+
 	if err == nil {
 		_, err = r.pool.Exec(ctx, `
 			UPDATE contacts SET closed_at = NULL, updated_at = NOW() WHERE id = $1 AND closed_at IS NOT NULL
@@ -88,7 +88,7 @@ func (r *ContactRepository) ResolveContact(
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Check again in TX to avoid duplicate insert race conditions
 	err = tx.QueryRow(ctx, `
@@ -194,7 +194,7 @@ func (r *ContactRepository) MergeContacts(ctx context.Context, workspaceID uuid.
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Validate workspaces
 	var primWS, secWS uuid.UUID

@@ -117,7 +117,6 @@ func (r *WebhookSubscriptionRepository) ListByWorkspace(ctx context.Context, wsI
 
 // Update modifies a subscription
 func (r *WebhookSubscriptionRepository) Update(ctx context.Context, id uuid.UUID, url string, eventTypes []string, active bool, secretPlaintext []byte) error {
-	var err error
 	if len(secretPlaintext) > 0 {
 		ciphertext, keyID, keyVersion, err := r.encryptor.Encrypt(secretPlaintext)
 		if err != nil {
@@ -129,14 +128,14 @@ func (r *WebhookSubscriptionRepository) Update(ctx context.Context, id uuid.UUID
 			 WHERE id = $7`,
 			url, eventTypes, active, ciphertext, keyID, keyVersion, id,
 		)
-	} else {
-		_, err = r.pool.Exec(ctx,
-			`UPDATE webhook_subscriptions 
+		return err
+	}
+	_, err := r.pool.Exec(ctx,
+		`UPDATE webhook_subscriptions
 			 SET url = $1, event_types = $2, active = $3, updated_at = now()
 			 WHERE id = $4`,
-			url, eventTypes, active, id,
-		)
-	}
+		url, eventTypes, active, id,
+	)
 	return err
 }
 

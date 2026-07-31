@@ -142,20 +142,27 @@ func (h *AuditHandler) exportCSV(c *echo.Context, filters repository.AuditFilter
 
 	c.Response().WriteHeader(http.StatusOK)
 	w := csv.NewWriter(c.Response())
-	defer w.Flush()
 
-	w.Write([]string{"timestamp", "workspace_id", "trace_id", "event_type", "payload"})
+	if err := w.Write([]string{"timestamp", "workspace_id", "trace_id", "event_type", "payload"}); err != nil {
+		return fmt.Errorf("write audit CSV header: %w", err)
+	}
 
 	for _, entry := range entries {
 		payload := string(entry.Payload)
 		payload = strings.Trim(payload, "\"")
-		w.Write([]string{
+		if err := w.Write([]string{
 			entry.CreatedAt.Format(time.RFC3339),
 			entry.WorkspaceID.String(),
 			entry.TraceID,
 			entry.EventType,
 			payload,
-		})
+		}); err != nil {
+			return fmt.Errorf("write audit CSV row: %w", err)
+		}
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		return fmt.Errorf("flush audit CSV: %w", err)
 	}
 
 	return nil

@@ -498,7 +498,7 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 		slog.Error("nats subscribe messages.> failed", "error", err)
 		return err
 	}
-	defer sub1.Unsubscribe()
+	defer func() { _ = sub1.Unsubscribe() }()
 
 	// Subscribe to incoming webhook events
 	sub2, err := h.NC.ChanSubscribe("inbound.events.>", ch)
@@ -506,7 +506,7 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 		slog.Error("nats subscribe inbound.events.> failed", "error", err)
 		return err
 	}
-	defer sub2.Unsubscribe()
+	defer func() { _ = sub2.Unsubscribe() }()
 
 	// Subscribe to webhook delivery events
 	sub3, err := h.NC.ChanSubscribe("webhooks.events", ch)
@@ -514,7 +514,7 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 		slog.Error("nats subscribe webhooks.events failed", "error", err)
 		return err
 	}
-	defer sub3.Unsubscribe()
+	defer func() { _ = sub3.Unsubscribe() }()
 
 	slog.Info("device connectivity tester websocket connection established")
 

@@ -468,6 +468,66 @@ func (m *mockPublisher) Publish(ctx context.Context, subject string, data []byte
 	return m.err
 }
 
+func TestCreateMessageWhatsAppMockQueueMapping(t *testing.T) {
+	e := echo.New()
+	publisher := &mockPublisher{}
+	workspaceID := uuid.New()
+	connectionID := uuid.New()
+	senderIdentity := "whatsapp-mock:" + connectionID.String()
+	handler := &MessageHandler{
+		Publisher: publisher,
+		ConnectionRepo: &mockConnectionRepo{
+			GetDefaultChannelConnectionFunc: func(_ context.Context, gotWorkspaceID uuid.UUID, channel string) (*repository.Connection, error) {
+				if gotWorkspaceID != workspaceID {
+					t.Fatalf("workspace ID = %s, want %s", gotWorkspaceID, workspaceID)
+				}
+				if channel != "whatsapp_mock" {
+					t.Fatalf("channel = %q, want whatsapp_mock", channel)
+				}
+				return &repository.Connection{
+					ID:             connectionID,
+					WorkspaceID:    workspaceID,
+					Channel:        "whatsapp_mock",
+					SenderIdentity: senderIdentity,
+					Status:         "connected",
+					IsDefault:      true,
+				}, nil
+			},
+		},
+	}
+	handler.RegisterRoutes(e)
+
+	traceID := uuid.New().String()
+	body := `{"to":"local-recipient","channel":"whatsapp_mock","body":"safe local test"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/messages", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req = req.WithContext(testContext(traceID, workspaceID))
+	rec := httptest.NewRecorder()
+
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if publisher.subject != "messages.outbound" || publisher.traceID != traceID {
+		t.Fatalf("unexpected publish subject=%q trace_id=%q", publisher.subject, publisher.traceID)
+	}
+
+	var queued domain.QueueMessage
+	if err := json.Unmarshal(publisher.data, &queued); err != nil {
+		t.Fatalf("decode queue message: %v", err)
+	}
+	if queued.WorkspaceID != workspaceID ||
+		queued.ConnectionID != connectionID ||
+		queued.SenderIdentity != senderIdentity ||
+		queued.TraceID != traceID ||
+		queued.To != "local-recipient" ||
+		queued.Channel != "whatsapp_mock" ||
+		queued.Body != "safe local test" {
+		t.Fatalf("unexpected queue message: %+v", queued)
+	}
+}
+
 func TestCreateMessageWithFallbackChannels(t *testing.T) {
 	e := echo.New()
 	pub := &mockPublisher{}

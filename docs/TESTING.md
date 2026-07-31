@@ -27,6 +27,24 @@ Validam o fluxo de ponta a ponta: do recebimento do webhook ou envio de requisi�
 * Utilizam bancos reais de teste e mocks dos canais de mensagem externos (Telegram/WABA).
 * Podem rodar utilizando contêineres locais ou via `testcontainers-go`.
 
+### Smoke local seguro do WhatsApp Mock
+O canal `whatsapp_mock` permite validar o transporte completo sem número, QR code, conta Meta ou requisição a um provedor externo. O smoke abaixo requer Docker e cria PostgreSQL e NATS próprios em portas efêmeras:
+```bash
+docker info >/dev/null
+go test -tags=integration ./cmd/pergo -run '^TestWhatsAppMockEndToEnd$' -count=1
+```
+
+Esse teste não reutiliza o NATS de desenvolvimento em `localhost:4222`; ele falha se não receber do `TestMain` a URL do contêiner isolado.
+
+### Integração completa e rastreada do WhatsApp Mock
+Para acompanhar o fluxo API → resolução de conexão → JetStream → worker → dispatcher mock → status e auditoria:
+```bash
+docker info >/dev/null
+go test -tags=integration ./cmd/pergo -run '^TestWhatsAppMockEndToEnd$' -count=1 -v
+```
+
+O resultado comprova o transporte e a orquestração do PerGo, incluindo a propagação de `X-Trace-ID`. Ele não comprova compatibilidade com o protocolo real do WhatsApp.
+
 ---
 
 ## Como Escrever Testes

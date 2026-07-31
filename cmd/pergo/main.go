@@ -29,10 +29,13 @@ import (
 	"github.com/pablojhp.pergo/internal/channel/instagram"
 	"github.com/pablojhp.pergo/internal/channel/telegram"
 	"github.com/pablojhp.pergo/internal/channel/whatsapp"
+	"github.com/pablojhp.pergo/internal/channel/whatsappmock"
 	"github.com/pablojhp.pergo/internal/config"
 	"github.com/pablojhp.pergo/internal/inbound"
+	"github.com/pablojhp.pergo/internal/integration/chatwoot"
+	"github.com/pablojhp.pergo/internal/integration/typebot"
+	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/outbound"
-	"github.com/pablojhp.pergo/internal/webhook"
 	"github.com/pablojhp.pergo/internal/platform/audit"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	echosrv "github.com/pablojhp.pergo/internal/platform/echo"
@@ -42,11 +45,9 @@ import (
 	"github.com/pablojhp.pergo/internal/platform/queue"
 	"github.com/pablojhp.pergo/internal/platform/shutdown"
 	"github.com/pablojhp.pergo/internal/platform/storage"
-	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/session"
-	"github.com/pablojhp.pergo/internal/integration/chatwoot"
-	"github.com/pablojhp.pergo/internal/integration/typebot"
+	"github.com/pablojhp.pergo/internal/webhook"
 	"github.com/pablojhp.pergo/templates/pages"
 )
 
@@ -214,6 +215,10 @@ func main() {
 	dispatcherRegistry.Register("instagram", instagramAdapter)
 	dispatcherRegistry.Register("email", emailAdapter)
 	dispatcherRegistry.Register("email_smtp", emailAdapter)
+	if cfg.WhatsAppMockEnabled {
+		dispatcherRegistry.Register("whatsapp_mock", whatsappmock.NewAdapter())
+		slog.Warn("local WhatsApp mock dispatcher is enabled; simulated sends never contact WhatsApp or Meta")
+	}
 
 	// --- Audit writer ---
 	auditWriter := audit.NewWriter(pool, 5000, 2)
@@ -597,7 +602,7 @@ func main() {
 	// Chatwoot integration routes
 	adminGroup.GET("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.GetSettings)
 	adminGroup.POST("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.PostSettings)
-	
+
 	// Typebot integration routes
 	adminGroup.GET("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.GetSettings)
 	adminGroup.POST("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.PostSettings)
@@ -651,8 +656,6 @@ func main() {
 	adminGroup.POST("/workspaces/:workspace_id/campaigns/:id/start", campaignHandler.Start)
 	adminGroup.POST("/workspaces/:workspace_id/campaigns/:id/cancel", campaignHandler.Cancel)
 	adminGroup.DELETE("/workspaces/:workspace_id/campaigns/:id", campaignHandler.Delete)
-
-
 
 	// Static files
 	e.Static("/static", "static")

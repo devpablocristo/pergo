@@ -170,10 +170,14 @@ type fakeDispatchMsg struct {
 	nakDelay time.Duration
 }
 
-func (m *fakeDispatchMsg) Data() []byte                         { return m.data }
-func (m *fakeDispatchMsg) Headers() map[string]string           { return m.headers }
-func (m *fakeDispatchMsg) Ack() error                           { m.acked = true; return nil }
-func (m *fakeDispatchMsg) NakWithDelay(d time.Duration) error   { m.nacked = true; m.nakDelay = d; return nil }
+func (m *fakeDispatchMsg) Data() []byte               { return m.data }
+func (m *fakeDispatchMsg) Headers() map[string]string { return m.headers }
+func (m *fakeDispatchMsg) Ack() error                 { m.acked = true; return nil }
+func (m *fakeDispatchMsg) NakWithDelay(d time.Duration) error {
+	m.nacked = true
+	m.nakDelay = d
+	return nil
+}
 
 type fakeDispatcher struct {
 	err         error
@@ -292,6 +296,42 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		}
 		if d.CurrentChannel != "whatsapp_cloud" {
 			t.Errorf("expected DB current channel 'whatsapp_cloud', got %s", d.CurrentChannel)
+		}
+	})
+
+	t.Run("Missing primary dispatcher falls back to registered channel", func(t *testing.T) {
+		traceID := uuid.New().String()
+		qMsg := &domain.QueueMessage{
+			WorkspaceID:      ws.ID,
+			TraceID:          traceID,
+			To:               "local-recipient",
+			Channel:          "unregistered-primary",
+			Body:             "fallback test",
+			FallbackChannels: []string{"whatsapp_mock"},
+		}
+		msg := &fakeDispatchMsg{}
+		fallback := &fakeDispatcher{}
+		registry := channel.NewRegistry(map[string]channel.Dispatcher{
+			"whatsapp_mock": fallback,
+		})
+
+		orchestrator := newTestOrchestrator(registry, dispatchRepo)
+		if err := orchestrator.Process(ctx, msg, qMsg, 0); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+		if !msg.acked {
+			t.Fatal("expected message to be acked")
+		}
+		if fallback.calledCount != 1 {
+			t.Fatalf("expected fallback dispatcher once, got %d", fallback.calledCount)
+		}
+
+		dispatch, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		if err != nil {
+			t.Fatalf("get dispatch: %v", err)
+		}
+		if dispatch.Status != "sent" || dispatch.CurrentChannel != "whatsapp_mock" {
+			t.Fatalf("unexpected dispatch state: status=%s channel=%s", dispatch.Status, dispatch.CurrentChannel)
 		}
 	})
 

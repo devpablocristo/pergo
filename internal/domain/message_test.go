@@ -38,6 +38,17 @@ func TestValidateMessageValid(t *testing.T) {
 	}
 }
 
+func TestValidateMessageWhatsAppMock(t *testing.T) {
+	req := &CreateMessageRequest{
+		To:      "local-recipient",
+		Channel: "whatsapp_mock",
+		Body:    "safe local test",
+	}
+	if err := ValidateMessage(req); err != nil {
+		t.Fatalf("expected whatsapp_mock to be accepted, got %+v", err)
+	}
+}
+
 func TestValidateMessageMissingTo(t *testing.T) {
 	req := &CreateMessageRequest{
 		Channel: "whatsapp",
@@ -462,8 +473,8 @@ func TestValidateMessageInteractiveStructure(t *testing.T) {
 		{
 			name: "button missing buttons array",
 			interactive: &Interactive{
-				Type: "button",
-				Body: TextContent{Text: "Choose an option"},
+				Type:   "button",
+				Body:   TextContent{Text: "Choose an option"},
 				Action: Action{},
 			},
 			expectError: true,
@@ -472,8 +483,8 @@ func TestValidateMessageInteractiveStructure(t *testing.T) {
 		{
 			name: "list missing sections",
 			interactive: &Interactive{
-				Type: "list",
-				Body: TextContent{Text: "Choose an option"},
+				Type:   "list",
+				Body:   TextContent{Text: "Choose an option"},
 				Action: Action{},
 			},
 			expectError: true,

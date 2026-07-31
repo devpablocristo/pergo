@@ -255,13 +255,13 @@ func (o *DispatchOrchestrator) SetContactRepository(repo *repository.ContactRepo
 
 func (o *DispatchOrchestrator) dispatchToChannel(ctx context.Context, channelName string, qMsg *domain.QueueMessage) (string, error) {
 	if o.dispatchers == nil {
-		return "", nil
+		return "", channel.NewTerminalError(fmt.Errorf("orchestrator: dispatcher registry is not configured for channel %q", channelName))
 	}
 
 	dispatcher, ok := o.dispatchers.Get(channelName)
 	if !ok {
-		slog.Warn("orchestrator: no dispatcher for channel, skipping", "channel", channelName, "trace_id", qMsg.TraceID)
-		return "", nil
+		slog.Warn("orchestrator: no dispatcher for channel", "channel", channelName, "trace_id", qMsg.TraceID)
+		return "", channel.NewTerminalError(fmt.Errorf("orchestrator: no dispatcher registered for channel %q", channelName))
 	}
 
 	to := qMsg.To
@@ -274,15 +274,15 @@ func (o *DispatchOrchestrator) dispatchToChannel(ctx context.Context, channelNam
 	}
 
 	return dispatcher.Dispatch(ctx, &channel.MessagePayload{
-		MessageID:      qMsg.TraceID,
-		ConnectionID:   qMsg.ConnectionID,
-		SenderIdentity: qMsg.SenderIdentity,
-		TraceID:        qMsg.TraceID,
-		To:             to,
-		Channel:        channelName,
-		Body:           qMsg.Body,
-		Media:          qMsg.Media,
-		Metadata:       qMsg.Metadata,
+		MessageID:        qMsg.TraceID,
+		ConnectionID:     qMsg.ConnectionID,
+		SenderIdentity:   qMsg.SenderIdentity,
+		TraceID:          qMsg.TraceID,
+		To:               to,
+		Channel:          channelName,
+		Body:             qMsg.Body,
+		Media:            qMsg.Media,
+		Metadata:         qMsg.Metadata,
 		TemplateName:     qMsg.TemplateName,
 		Language:         qMsg.Language,
 		Components:       qMsg.Components,

@@ -25,6 +25,7 @@ const (
 // ValidChannels defines the set of accepted channel values.
 var ValidChannels = map[string]bool{
 	"whatsapp":       true,
+	"whatsapp_mock":  true,
 	"whatsapp_cloud": true,
 	"telegram":       true,
 	"instagram":      true,
@@ -90,15 +91,15 @@ type Row struct {
 
 // CreateMessageRequest is the JSON payload for POST /messages.
 type CreateMessageRequest struct {
-	To               string              `json:"to"`
-	From             string              `json:"from,omitempty"`
-	Channel          string              `json:"channel"`
-	Body             string              `json:"body"`
-	Media            *Media              `json:"media,omitempty"`
-	Metadata         map[string]string   `json:"metadata,omitempty"`
-	TTLSeconds       *int                `json:"ttl_seconds,omitempty"`
-	TemplateName     string              `json:"template_name,omitempty"`
-	Language         string              `json:"language,omitempty"`
+	To               string                     `json:"to"`
+	From             string                     `json:"from,omitempty"`
+	Channel          string                     `json:"channel"`
+	Body             string                     `json:"body"`
+	Media            *Media                     `json:"media,omitempty"`
+	Metadata         map[string]string          `json:"metadata,omitempty"`
+	TTLSeconds       *int                       `json:"ttl_seconds,omitempty"`
+	TemplateName     string                     `json:"template_name,omitempty"`
+	Language         string                     `json:"language,omitempty"`
 	Components       []TemplateComponent        `json:"components,omitempty"`
 	FallbackChannels []string                   `json:"fallback_channels,omitempty"`
 	Interactive      *Interactive               `json:"interactive,omitempty"`
@@ -108,21 +109,21 @@ type CreateMessageRequest struct {
 
 // QueueMessage wraps the published payload for JetStream queues.
 type QueueMessage struct {
-	WorkspaceID      uuid.UUID           `json:"workspace_id"`
-	ConnectionID     uuid.UUID           `json:"connection_id"`
-	SenderIdentity   string              `json:"sender_identity"`
-	TraceID          string              `json:"trace_id"`
-	To               string              `json:"to"`
-	Channel          string              `json:"channel"`
-	Body             string              `json:"body"`
-	Media            *Media              `json:"media,omitempty"`
-	Metadata         map[string]string   `json:"metadata,omitempty"`
-	TTLSeconds       *int                `json:"ttl_seconds,omitempty"`
-	QueuedAt         time.Time           `json:"queued_at"`
-	FallbackChannels []string            `json:"fallback_channels,omitempty"`
-	TemplateName     string              `json:"template_name,omitempty"`
-	Language         string              `json:"language,omitempty"`
-	Components       []TemplateComponent `json:"components,omitempty"`
+	WorkspaceID      uuid.UUID                  `json:"workspace_id"`
+	ConnectionID     uuid.UUID                  `json:"connection_id"`
+	SenderIdentity   string                     `json:"sender_identity"`
+	TraceID          string                     `json:"trace_id"`
+	To               string                     `json:"to"`
+	Channel          string                     `json:"channel"`
+	Body             string                     `json:"body"`
+	Media            *Media                     `json:"media,omitempty"`
+	Metadata         map[string]string          `json:"metadata,omitempty"`
+	TTLSeconds       *int                       `json:"ttl_seconds,omitempty"`
+	QueuedAt         time.Time                  `json:"queued_at"`
+	FallbackChannels []string                   `json:"fallback_channels,omitempty"`
+	TemplateName     string                     `json:"template_name,omitempty"`
+	Language         string                     `json:"language,omitempty"`
+	Components       []TemplateComponent        `json:"components,omitempty"`
 	CampaignID       *uuid.UUID                 `json:"campaign_id,omitempty"`
 	VariablesJSON    map[string]string          `json:"variables_json,omitempty"`
 	Interactive      *Interactive               `json:"interactive,omitempty"`
@@ -183,7 +184,7 @@ func ValidateMessage(req *CreateMessageRequest) *ErrorResponse {
 	} else if !ValidChannels[req.Channel] {
 		details = append(details, FieldError{
 			Field:   "channel",
-			Message: "must be one of: whatsapp, whatsapp_cloud, telegram, instagram, email, email_ses, email_smtp, email_mautic",
+			Message: "must be one of: whatsapp, whatsapp_mock, whatsapp_cloud, telegram, instagram, email, email_ses, email_smtp, email_mautic",
 		})
 	}
 
@@ -218,7 +219,7 @@ func ValidateMessage(req *CreateMessageRequest) *ErrorResponse {
 		if !ValidChannels[fb] {
 			details = append(details, FieldError{
 				Field:   fmt.Sprintf("fallback_channels[%d]", i),
-				Message: "unsupported channel: must be one of: whatsapp, whatsapp_cloud, telegram, instagram, email, email_ses, email_smtp, email_mautic",
+				Message: "unsupported channel: must be one of: whatsapp, whatsapp_mock, whatsapp_cloud, telegram, instagram, email, email_ses, email_smtp, email_mautic",
 			})
 		}
 		if seen[fb] {

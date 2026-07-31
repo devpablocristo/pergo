@@ -99,7 +99,7 @@ func (m *Manager) StartPairing(ctx context.Context, workspaceID uuid.UUID, phone
 		ProxyURL:  proxyURL,
 	}
 
-	wc, err := whatsapp.NewWhatsAppClient(cfg)
+	wc, err := m.clientFactory.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("session manager: create whatsapp client: %w", err)
 	}
@@ -190,7 +190,7 @@ func (m *Manager) StartPairing(ctx context.Context, workspaceID uuid.UUID, phone
 }
 
 // onPairingSuccess persists the newly paired device and registers its session.
-func (m *Manager) onPairingSuccess(ctx context.Context, wc *whatsapp.WhatsAppClient, workspaceID uuid.UUID, phone string, existingConnID *uuid.UUID, proxyURL string) error {
+func (m *Manager) onPairingSuccess(ctx context.Context, wc whatsapp.Client, workspaceID uuid.UUID, phone string, existingConnID *uuid.UUID, proxyURL string) error {
 	jid := wc.JID()
 	now := time.Now()
 

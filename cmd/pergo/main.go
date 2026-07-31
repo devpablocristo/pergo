@@ -692,11 +692,7 @@ func main() {
 	})
 
 	// Restore persisted WhatsApp Web sessions without delaying HTTP readiness.
-	go func() {
-		if err := sessionManager.ReconnectAll(ctx); err != nil && ctx.Err() == nil {
-			slog.Error("failed to restore WhatsApp sessions", "error", err)
-		}
-	}()
+	startWhatsAppRestoration(ctx, sessionManager)
 
 	go func() {
 		slog.Info("starting server", "port", cfg.ServerPort)
@@ -731,6 +727,17 @@ func runServer(ctx context.Context, pool *pgxpool.Pool, db *sql.DB) error {
 	_ = db
 	<-ctx.Done()
 	return nil
+}
+
+// startWhatsAppRestoration is the startup hook for persisted WhatsApp Web
+// sessions. Keeping it separate makes the production bootstrap testable with
+// a fake client factory and a real connections repository.
+func startWhatsAppRestoration(ctx context.Context, manager *session.Manager) {
+	go func() {
+		if err := manager.ReconnectAll(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("failed to restore WhatsApp sessions", "error", err)
+		}
+	}()
 }
 
 // natsConn wraps *nats.Conn to satisfy the handler.NATSConn interface.

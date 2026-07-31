@@ -14,7 +14,7 @@ import (
 type Session struct {
 	DeviceID     string
 	JID          types.JID
-	Client       *whatsapp.WhatsAppClient
+	Client       whatsapp.Client
 	Cancel       func()
 	MessagesSent atomic.Int64
 }
@@ -119,5 +119,9 @@ func (r *ActiveSession) GetClient(jid string) *whatsapp.WhatsAppClient {
 	if !ok {
 		return nil
 	}
-	return s.Client
+	client, ok := s.Client.(*whatsapp.WhatsAppClient)
+	if !ok {
+		return nil
+	}
+	return client
 }

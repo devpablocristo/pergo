@@ -22,6 +22,41 @@ type ClientConfig struct {
 	ProxyURL  string
 }
 
+// Client is the lifecycle surface used by the session manager. Keeping this
+// small interface in the WhatsApp package lets startup restoration be tested
+// with an in-memory client instead of opening a connection to WhatsApp.
+type Client interface {
+	JID() types.JID
+	SetJID(types.JID)
+	Run(context.Context) error
+	Wait(context.Context)
+	GetQRChannel(context.Context) (<-chan whatsmeow.QRChannelItem, error)
+	Connect() error
+	Disconnect()
+	AddEventHandler(whatsmeow.EventHandler) uint32
+	Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error)
+}
+
+// ClientFactory creates clients for pairing and persisted-session restoration.
+// Production uses NewClientFactory; tests can provide a deterministic fake.
+type ClientFactory interface {
+	New(ClientConfig) (Client, error)
+}
+
+// ClientFactoryFunc adapts a function into a ClientFactory.
+type ClientFactoryFunc func(ClientConfig) (Client, error)
+
+func (f ClientFactoryFunc) New(cfg ClientConfig) (Client, error) {
+	return f(cfg)
+}
+
+// NewClientFactory returns the production whatsmeow-backed client factory.
+func NewClientFactory() ClientFactory {
+	return ClientFactoryFunc(func(cfg ClientConfig) (Client, error) {
+		return NewWhatsAppClient(cfg)
+	})
+}
+
 // WhatsAppClient wraps a whatsmeow client with event handlers and lifecycle
 // management. It provides the Run/Stop goroutine pattern for per-device
 // sessions.
@@ -163,6 +198,17 @@ func (wc *WhatsAppClient) Connect() error {
 // Disconnect disconnects from the WhatsApp WebSocket.
 func (wc *WhatsAppClient) Disconnect() {
 	wc.client.Disconnect()
+}
+
+// AddEventHandler delegates to whatsmeow while keeping the session manager
+// independent from the concrete client implementation.
+func (wc *WhatsAppClient) AddEventHandler(handler whatsmeow.EventHandler) uint32 {
+	return wc.client.AddEventHandler(handler)
+}
+
+// Download delegates media retrieval to whatsmeow.
+func (wc *WhatsAppClient) Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error) {
+	return wc.client.Download(ctx, msg)
 }
 
 // ConfigureProxy sets up SOCKS5/HTTP proxy for whatsmeow client connection.

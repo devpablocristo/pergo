@@ -42,9 +42,12 @@ type Manager struct {
 	dispatchers      *channel.Registry
 	waVersion        string
 	inboundProcessor *inbound.InboundProcessor
+	clientFactory    whatsapp.ClientFactory
 	reconnect        func(context.Context, *repository.Connection) error
 	wait             func(context.Context, time.Duration) bool
 	initialJitter    func() time.Duration
+	reconnectMu      sync.Mutex
+	reconnectCancel  context.CancelFunc
 }
 
 type connectionStore interface {
@@ -53,6 +56,23 @@ type connectionStore interface {
 	ListAll(context.Context) ([]*repository.Connection, error)
 	ListByWorkspace(context.Context, uuid.UUID) ([]*repository.Connection, error)
 	UpdateStatus(context.Context, uuid.UUID, string) error
+}
+
+// ReconnectOption configures reconnection behavior. Production uses the
+// defaults; tests can provide a deterministic clock without sleeping.
+type ReconnectOption func(*Manager)
+
+// WithReconnectTiming replaces the wait and startup-jitter functions. Nil
+// functions retain their production defaults.
+func WithReconnectTiming(wait func(context.Context, time.Duration) bool, initialJitter func() time.Duration) ReconnectOption {
+	return func(m *Manager) {
+		if wait != nil {
+			m.wait = wait
+		}
+		if initialJitter != nil {
+			m.initialJitter = initialJitter
+		}
+	}
 }
 
 // NewManager creates a session manager.
@@ -64,6 +84,25 @@ func NewManager(
 	waVersion string,
 	inboundProcessor *inbound.InboundProcessor,
 ) *Manager {
+	return NewManagerWithClientFactory(db, repo, registry, dispatchers, waVersion, inboundProcessor, whatsapp.NewClientFactory())
+}
+
+// NewManagerWithClientFactory creates a manager with an explicit client
+// factory. It is used by process-level tests to restore persisted sessions
+// without contacting WhatsApp.
+func NewManagerWithClientFactory(
+	db *sql.DB,
+	repo *repository.ConnectionRepository,
+	registry *ActiveSession,
+	dispatchers *channel.Registry,
+	waVersion string,
+	inboundProcessor *inbound.InboundProcessor,
+	clientFactory whatsapp.ClientFactory,
+	options ...ReconnectOption,
+) *Manager {
+	if clientFactory == nil {
+		clientFactory = whatsapp.NewClientFactory()
+	}
 	m := &Manager{
 		db:               db,
 		repo:             repo,
@@ -71,11 +110,17 @@ func NewManager(
 		dispatchers:      dispatchers,
 		waVersion:        waVersion,
 		inboundProcessor: inboundProcessor,
+		clientFactory:    clientFactory,
 	}
 	m.reconnect = m.reconnectDevice
 	m.wait = waitForReconnect
 	m.initialJitter = func() time.Duration {
 		return time.Duration(rand.Int64N(int64(defaultReconnectBackoff)))
+	}
+	for _, option := range options {
+		if option != nil {
+			option(m)
+		}
 	}
 	return m
 }
@@ -84,6 +129,18 @@ func NewManager(
 // backoff and storm protection (semaphore cap).
 // It blocks until all reconnection attempts complete or ctx is cancelled.
 func (m *Manager) ReconnectAll(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	m.reconnectMu.Lock()
+	m.reconnectCancel = cancel
+	m.reconnectMu.Unlock()
+	defer func() {
+		m.reconnectMu.Lock()
+		if m.reconnectCancel != nil {
+			m.reconnectCancel = nil
+		}
+		m.reconnectMu.Unlock()
+	}()
+
 	allConns, err := m.repo.ListAll(ctx)
 	if err != nil {
 		return fmt.Errorf("session manager: list connections: %w", err)
@@ -127,7 +184,9 @@ func (m *Manager) ReconnectAll(ctx context.Context) error {
 					"device_id", d.ID,
 					"jid", *d.JID,
 				)
-				_ = m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusDisconnected))
+				if updateErr := m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusDisconnected)); updateErr != nil && ctx.Err() == nil {
+					slog.Error("session manager: failed to mark device disconnected", "error", updateErr, "device_id", d.ID)
+				}
 				if !m.wait(ctx, calcBackoff(attempt)) {
 					return
 				}
@@ -150,6 +209,14 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 		"device_id", d.ID,
 	)
 
+	jid, err := parseJID(*d.JID)
+	if err != nil {
+		return fmt.Errorf("parse JID: %w", err)
+	}
+	if m.registry.Get(jid) != nil {
+		return nil
+	}
+
 	cfg := whatsapp.ClientConfig{
 		DB:        m.db,
 		WAVersion: m.waVersion,
@@ -158,23 +225,16 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 		cfg.ProxyURL = *d.ProxyURL
 	}
 
-	wc, err := whatsapp.NewWhatsAppClient(cfg)
+	wc, err := m.clientFactory.New(cfg)
 	if err != nil {
 		return fmt.Errorf("create whatsapp client: %w", err)
 	}
 
-	// Set the JID from the persisted device record
-	jid, err := parseJID(*d.JID)
-	if err != nil {
-		return fmt.Errorf("parse JID: %w", err)
-	}
+	// Set the JID from the persisted device record.
 	wc.SetJID(jid)
 
-	if m.registry.Get(jid) != nil {
-		return nil
-	}
-
 	if err := wc.Connect(); err != nil {
+		wc.Disconnect()
 		return fmt.Errorf("connect whatsapp client: %w", err)
 	}
 
@@ -192,11 +252,13 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 	m.registry.Add(sess)
 
 	// Register event handler to update recipient_sessions on incoming messages
-	wc.Client().AddEventHandler(func(evt interface{}) {
+	wc.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *waEvents.LoggedOut:
 			slog.Warn("session manager: whatsmeow logged out event received, marking device terminal", "device_id", d.ID)
-			_ = m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusTerminal))
+			if err := m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusTerminal)); err != nil {
+				slog.Error("session manager: failed to mark device terminal", "error", err, "device_id", d.ID)
+			}
 			cancel()
 		case *waEvents.Message:
 			if v.Info.IsFromMe {
@@ -214,7 +276,7 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 			hasMedia := false
 
 			if imageMsg := v.Message.GetImageMessage(); imageMsg != nil {
-				data, err := wc.Client().Download(ctxBg, imageMsg)
+				data, err := wc.Download(ctxBg, imageMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -224,7 +286,7 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 					mediaCaption = *imageMsg.Caption
 				}
 			} else if docMsg := v.Message.GetDocumentMessage(); docMsg != nil {
-				data, err := wc.Client().Download(ctxBg, docMsg)
+				data, err := wc.Download(ctxBg, docMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -237,14 +299,14 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 					mediaCaption = *docMsg.Caption
 				}
 			} else if audioMsg := v.Message.GetAudioMessage(); audioMsg != nil {
-				data, err := wc.Client().Download(ctxBg, audioMsg)
+				data, err := wc.Download(ctxBg, audioMsg)
 				if err == nil {
 					mediaBytes = data
 				}
 				mediaType = "audio"
 				hasMedia = true
 			} else if videoMsg := v.Message.GetVideoMessage(); videoMsg != nil {
-				data, err := wc.Client().Download(ctxBg, videoMsg)
+				data, err := wc.Download(ctxBg, videoMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -319,7 +381,9 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 	go func() {
 		wc.Wait(sessionCtx)
 		// Update status when goroutine exits
-		_ = m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusDisconnected))
+		if err := m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusDisconnected)); err != nil {
+			slog.Error("session manager: failed to mark stopped device disconnected", "error", err, "device_id", d.ID)
+		}
 		m.registry.Remove(jid)
 	}()
 
@@ -356,6 +420,12 @@ func parseJID(jid string) (types.JID, error) {
 // StopAll gracefully stops all active sessions.
 func (m *Manager) StopAll() {
 	slog.Info("session manager: stopping all sessions", "count", m.registry.Len())
+	m.reconnectMu.Lock()
+	cancel := m.reconnectCancel
+	m.reconnectMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	m.registry.StopAll()
 }
 

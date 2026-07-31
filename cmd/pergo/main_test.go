@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,13 +10,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/api/handler"
+	"github.com/pablojhp.pergo/internal/channel/whatsapp"
 	"github.com/pablojhp.pergo/internal/integration/chatwoot"
 	"github.com/pablojhp.pergo/internal/integration/typebot"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	echosrv "github.com/pablojhp.pergo/internal/platform/echo"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/session"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // TestServerBootHealthz verifies the server starts on a random port and
@@ -154,6 +160,89 @@ func TestGracefulShutdown(t *testing.T) {
 	}
 }
 
+// TestServerStartupRestoresPersistedWhatsAppSession verifies the same startup
+// hook used by main restores a persisted WhatsApp connection. The client is a
+// deterministic fake, so the test never opens a connection to Meta.
+func TestServerStartupRestoresPersistedWhatsAppSession(t *testing.T) {
+	ctx := context.Background()
+	pool, err := postgres.NewPool(ctx, testDSN())
+	if err != nil {
+		t.Skipf("skipping: cannot create pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping: cannot ping PostgreSQL: %v", err)
+	}
+
+	db, err := postgres.NewSQLDB(pool)
+	if err != nil {
+		t.Fatalf("NewSQLDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := postgres.RunMigrations(db); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	enc, err := crypto.NewEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	repo := repository.NewConnectionRepository(pool, enc)
+	workspaceID := uuid.New()
+	if _, err := pool.Exec(ctx, "INSERT INTO workspaces (id, name, created_at, updated_at) VALUES ($1, $2, NOW(), NOW())", workspaceID, "startup-reconnect-"+workspaceID.String()); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _, _ = pool.Exec(context.Background(), "DELETE FROM workspaces WHERE id = $1", workspaceID) }()
+
+	jid := "5491100000001:1@s.whatsapp.net"
+	connection := &repository.Connection{
+		ID:             uuid.New(),
+		WorkspaceID:    workspaceID,
+		Name:           "Persisted test device",
+		Channel:        "whatsapp",
+		SenderIdentity: "5491100000001",
+		JID:            &jid,
+		Status:         string(session.DeviceStatusDisconnected),
+	}
+	if err := repo.Create(ctx, connection); err != nil {
+		t.Fatalf("seed persisted WhatsApp connection: %v", err)
+	}
+	defer func() { _ = repo.Delete(context.Background(), connection.ID) }()
+
+	fake := newStartupFakeClient()
+	factory := whatsapp.ClientFactoryFunc(func(whatsapp.ClientConfig) (whatsapp.Client, error) {
+		return fake, nil
+	})
+	registry := session.NewActiveSession()
+	manager := session.NewManagerWithClientFactory(
+		db, repo, registry, nil, "", nil, factory,
+		session.WithReconnectTiming(func(context.Context, time.Duration) bool { return true }, func() time.Duration { return 0 }),
+	)
+	serverCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// This is the exact hook main calls before ListenAndServe; the test does
+	// not invoke ReconnectAll directly.
+	startWhatsAppRestoration(serverCtx, manager)
+	select {
+	case <-fake.connected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup did not reconnect persisted WhatsApp session")
+	}
+	eventually(t, 2*time.Second, func() bool {
+		stored, getErr := repo.GetByID(context.Background(), connection.ID)
+		return getErr == nil && stored.Status == string(session.DeviceStatusConnected) && registry.Len() == 1
+	}, "connection was not marked connected and registered after startup")
+
+	cancel()
+	select {
+	case <-fake.disconnected:
+	case <-time.After(2 * time.Second):
+		t.Fatal("restored client did not stop after root context cancellation")
+	}
+	eventually(t, 2*time.Second, func() bool { return registry.Len() == 0 }, "restored session remained registered after shutdown")
+}
+
 // --- helpers ---
 
 func TestCompositionRoot_AllIntegrationsWired(t *testing.T) {
@@ -197,6 +286,64 @@ func testDSN() string {
 		return dsn
 	}
 	return "postgres://postgres:postgres@localhost:5432/pergo_test?sslmode=disable"
+}
+
+func eventually(t *testing.T, timeout time.Duration, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
+type startupFakeClient struct {
+	jid          types.JID
+	connected    chan struct{}
+	disconnected chan struct{}
+}
+
+func newStartupFakeClient() *startupFakeClient {
+	return &startupFakeClient{connected: make(chan struct{}), disconnected: make(chan struct{})}
+}
+
+func (c *startupFakeClient) JID() types.JID       { return c.jid }
+func (c *startupFakeClient) SetJID(jid types.JID) { c.jid = jid }
+func (c *startupFakeClient) Run(ctx context.Context) error {
+	if err := c.Connect(); err != nil {
+		return err
+	}
+	c.Wait(ctx)
+	return nil
+}
+func (c *startupFakeClient) Wait(ctx context.Context) {
+	<-ctx.Done()
+	c.Disconnect()
+}
+func (c *startupFakeClient) GetQRChannel(context.Context) (<-chan whatsmeow.QRChannelItem, error) {
+	return nil, errors.New("QR pairing is not used by this test client")
+}
+func (c *startupFakeClient) Connect() error {
+	select {
+	case <-c.connected:
+	default:
+		close(c.connected)
+	}
+	return nil
+}
+func (c *startupFakeClient) Disconnect() {
+	select {
+	case <-c.disconnected:
+	default:
+		close(c.disconnected)
+	}
+}
+func (c *startupFakeClient) AddEventHandler(whatsmeow.EventHandler) uint32 { return 0 }
+func (c *startupFakeClient) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
+	return nil, errors.New("media download is not used by this test client")
 }
 
 // noopNATS satisfies the handler.NATSConn interface and always succeeds.

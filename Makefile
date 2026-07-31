@@ -23,7 +23,7 @@ endif
 # Garante que ~/go/bin esteja no PATH para encontrar air e templ
 export PATH := $(HOME)/go/bin:$(PATH)
 
-DEV_INFRA_DIR ?= $(shell test -d ../devInfra && echo "../devInfra" || (test -d ../devinfra && echo "../devinfra" || echo "../devInfra"))
+DEV_INFRA_DIR ?= $(shell test -d ../devInfra && echo "../devInfra" || (test -d ../devinfra && echo "../devinfra" || echo "context/devInfra"))
 BINARY        := ./bin/pergo
 BUILD_FLAGS   := -ldflags="-s -w"
 

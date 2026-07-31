@@ -7,6 +7,7 @@ networks:
 
 volumes:
   postgres_data:
+  nats_data:
   redis_data:
   minio_data:
   mailpit_data:
@@ -69,10 +70,12 @@ services:
     image: nats:latest
     container_name: shared_nats
     restart: unless-stopped
-    command: "-js"
+    command: ["-js", "-sd", "/data"]
     ports:
       - "4222:4222"
       - "8222:8222"
+    volumes:
+      - nats_data:/data
     networks:
       - shared-infra-net
 

@@ -17,7 +17,7 @@ func TestTypebotClient_StartChat(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/typebots/bot123/startChat" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(StartChatResponse{
+			_ = json.NewEncoder(w).Encode(StartChatResponse{
 				SessionID: "sess_123",
 				Messages: []Message{
 					{
@@ -56,7 +56,7 @@ func TestTypebotClient_ContinueChat(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/sessions/sess_123/continueChat" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(ContinueChatResponse{
+			_ = json.NewEncoder(w).Encode(ContinueChatResponse{
 				Messages: []Message{
 					{
 						ID:   "m2",

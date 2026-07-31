@@ -304,7 +304,9 @@ func TestInboundProcessor_Process(t *testing.T) {
 
 		// Verify Media URL in payload
 		var payload inbound.InboundEventPayload
-		json.Unmarshal(pub.published[0].data, &payload)
+		if err := json.Unmarshal(pub.published[0].data, &payload); err != nil {
+			t.Fatalf("failed to decode inbound payload: %v", err)
+		}
 		if payload.Media == nil {
 			t.Fatal("expected media in payload")
 		}
@@ -352,7 +354,9 @@ func TestInboundProcessor_Process(t *testing.T) {
 		}
 
 		var payload inbound.InboundEventPayload
-		json.Unmarshal(pub.published[0].data, &payload)
+		if err := json.Unmarshal(pub.published[0].data, &payload); err != nil {
+			t.Fatalf("failed to decode inbound payload: %v", err)
+		}
 
 		// Verification: Location and Contacts should be filtered (nil/empty)
 		if payload.Location != nil {
@@ -449,7 +453,7 @@ func TestProcess_StatusUpdate(t *testing.T) {
 	sessRepo := repository.NewRecipientSessionRepository(pool)
 	contactRepo := repository.NewContactRepository(pool)
 
-	ws, err := wsRepo.Create(ctx, "status_update_test_ws_" + uuid.New().String())
+	ws, err := wsRepo.Create(ctx, "status_update_test_ws_"+uuid.New().String())
 	if err != nil {
 		t.Fatalf("failed to create test workspace: %v", err)
 	}
@@ -573,7 +577,7 @@ func TestInboundProcessor_ChatwootSyncer(t *testing.T) {
 	contactRepo := repository.NewContactRepository(pool)
 	dispatchRepo := repository.NewMessageDispatchRepository(pool)
 
-	ws, err := wsRepo.Create(ctx, "chatwoot_syncer_test_ws_" + uuid.New().String())
+	ws, err := wsRepo.Create(ctx, "chatwoot_syncer_test_ws_"+uuid.New().String())
 	if err != nil {
 		t.Fatalf("failed to create test workspace: %v", err)
 	}
@@ -631,7 +635,7 @@ func TestInboundProcessor_BotCooldown(t *testing.T) {
 	contactRepo := repository.NewContactRepository(pool)
 	dispatchRepo := repository.NewMessageDispatchRepository(pool)
 
-	ws, err := wsRepo.Create(ctx, "cooldown_test_ws_" + uuid.New().String())
+	ws, err := wsRepo.Create(ctx, "cooldown_test_ws_"+uuid.New().String())
 	if err != nil {
 		t.Fatalf("failed to create test workspace: %v", err)
 	}

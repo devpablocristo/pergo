@@ -110,13 +110,13 @@ func TestConfigureProxy_Integration(t *testing.T) {
 		}
 
 		if !hasUserPass {
-			conn.Write([]byte{0x05, 0xff})
+			_, _ = conn.Write([]byte{0x05, 0xff})
 			t.Errorf("proxy: user/pass auth method not proposed")
 			return
 		}
 
 		// Respond with username/password method (0x02)
-		conn.Write([]byte{0x05, 0x02})
+		_, _ = conn.Write([]byte{0x05, 0x02})
 
 		// Read auth request
 		if _, err := io.ReadFull(conn, buf[:2]); err != nil {
@@ -149,10 +149,10 @@ func TestConfigureProxy_Integration(t *testing.T) {
 		}
 
 		if string(userBuf) == expectedUser && string(passBuf) == expectedPass {
-			conn.Write([]byte{0x01, 0x00}) // auth success
+			_, _ = conn.Write([]byte{0x01, 0x00}) // auth success
 			authChan <- true
 		} else {
-			conn.Write([]byte{0x01, 0x01}) // auth failure
+			_, _ = conn.Write([]byte{0x01, 0x01}) // auth failure
 			authChan <- false
 		}
 	}()

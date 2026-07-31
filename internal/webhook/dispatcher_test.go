@@ -196,7 +196,9 @@ func TestDefaultDispatcher_Dispatch(t *testing.T) {
 		req := httpClient.requests[0]
 		bodyBytes, _ := io.ReadAll(req.Body)
 		var sentEvent map[string]any
-		json.Unmarshal(bodyBytes, &sentEvent)
+		if err := json.Unmarshal(bodyBytes, &sentEvent); err != nil {
+			t.Fatalf("failed to decode dispatched event: %v", err)
+		}
 
 		// Verification: 'from' should be hashed, 'location' should be nil
 		fromVal := sentEvent["from"].(string)

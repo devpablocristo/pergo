@@ -279,16 +279,8 @@ This project is licensed under the MIT License.
 
 The quickest way to get PerGo up and running is using Docker Compose:
 
-1. **Start Postgres and NATS services:**
+1. **Start PerGo, Postgres, and NATS:**
    ```bash
-   docker compose up -d
-   ```
-2. **Generate UI template files:**
-   ```bash
-   make generate
-   ```
-3. **Start the local development server:**
-   ```bash
-   make dev
+   make up
    ```
    The admin console will be available at `http://localhost:8080/admin`.

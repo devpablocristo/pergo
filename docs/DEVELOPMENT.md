@@ -94,17 +94,10 @@ Para configurar o ambiente de desenvolvimento local, siga os passos abaixo:
      ```
    - Edite o arquivo `.env` gerado. Certifique-se de configurar a variável `PERGO_KEK_BASE64` com uma chave AES-256 válida gerada via Base64 (ex: `openssl rand -base64 32`).
 
-3. **Iniciar a Infraestrutura**:
-   - Suba os contêineres do PostgreSQL e NATS JetStream:
+3. **Iniciar PerGo e a Infraestrutura**:
+   - Suba PerGo, PostgreSQL e NATS JetStream pelo mesmo Docker Compose:
      ```bash
-     make infra
-     ```
-   - Isso iniciará o PostgreSQL na porta `5433` (mapeada para `5432`) e o NATS na porta `4222` localmente.
-
-4. **Executar a Aplicação**:
-   - Inicie o servidor em modo de desenvolvimento com hot-reload automático:
-     ```bash
-     make dev
+     make up
      ```
    - O PerGo executará automaticamente as migrações SQL pendentes (via Goose) no banco de dados na primeira inicialização.
    - O painel administrativo estará acessível em `http://localhost:8080/admin` usando as credenciais definidas em seu `.env` (`PERGO_ADMIN_PASSWORD`).
@@ -122,9 +115,11 @@ O projeto gerencia tarefas comuns de build e desenvolvimento por meio do `Makefi
   - `make clean`: Remove binários de compilação e diretórios temporários (`./bin/` e `./tmp/`).
 
 * **Infraestrutura e Contêineres**:
-  - `make infra`: Inicia apenas os serviços de PostgreSQL e NATS em background usando Docker Compose.
-  - `make infra-down`: Derruba apenas a infraestrutura local.
-  - `make prod`: Constrói a imagem Docker local e sobe todos os serviços (aplicativo + banco + mensageria) em produção via Docker Compose.
+  - `make up`: Constrói a imagem local e sobe PerGo, PostgreSQL e NATS pelo mesmo Docker Compose.
+  - `make down`: Para e remove os contêineres, preservando os volumes locais.
+  - `make infra`: Inicia apenas PostgreSQL e NATS do mesmo Compose.
+  - `make infra-down`: Para apenas PostgreSQL e NATS do mesmo Compose.
+  - `make prod`: Alias de `make up`.
   - `make prod-logs`: Acompanha a saída de logs do aplicativo rodando em produção.
   - `make prod-down`: Encerra e remove todos os contêineres de produção.
 

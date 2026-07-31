@@ -2,8 +2,8 @@
 #  PerGo — Makefile
 #  Uso:
 #    make dev        → hot-reload (carrega .env automaticamente)
-#    make up         → build + sobe o app via docker compose
-#    make down       → para o app via docker compose (preserva volumes)
+#    make up         → build + sobe app, PostgreSQL e NATS via docker compose
+#    make down       → para todos os serviços via docker compose (preserva volumes)
 #    make prod       → alias de make up
 #    make infra      → sobe só postgres + nats (sem o app)
 #    make infra-down → derruba infra
@@ -25,7 +25,6 @@ endif
 # Garante que ~/go/bin esteja no PATH para encontrar air e templ
 export PATH := $(HOME)/go/bin:$(PATH)
 
-DEV_INFRA_DIR ?= $(shell test -d ../devInfra && echo "../devInfra" || (test -d ../devinfra && echo "../devinfra" || echo "context/devInfra"))
 BINARY        := ./bin/pergo
 BUILD_FLAGS   := -ldflags="-s -w"
 
@@ -41,17 +40,17 @@ watch: dev
 
 # ─── Produção ────────────────────────────────────────────────
 
-## up: build da imagem e sobe PerGo via Docker Compose
+## up: build da imagem e sobe PerGo, PostgreSQL e NATS via Docker Compose
 up:
-	@echo "→ Fazendo build e subindo PerGo via Docker Compose..."
-	@docker compose --env-file .env up --build -d
-	@echo "✓ Rodando em http://localhost:$${PERGO_SERVER_PORT:-8080}"
+	@echo "→ Fazendo build e subindo PerGo + PostgreSQL + NATS via Docker Compose..."
+	@docker compose up --build -d
+	@echo "✓ Rodando em http://localhost:$${PERGO_HOST_PORT:-8080}"
 
-## down: para PerGo via Docker Compose sem apagar volumes
+## down: para todos os serviços via Docker Compose sem apagar volumes
 down:
-	@if [ -n "$$(docker compose --env-file .env ps -aq)" ]; then \
-		echo "→ Parando PerGo via Docker Compose (volumes preservados)..."; \
-		docker compose --env-file .env down; \
+	@if [ -n "$$(docker compose ps -aq)" ]; then \
+		echo "→ Parando PerGo, PostgreSQL e NATS (volumes preservados)..."; \
+		docker compose down; \
 	else \
 		echo "✓ PerGo ya estaba detenido."; \
 	fi
@@ -66,18 +65,18 @@ prod-logs:
 ## prod-down: alias de make down
 prod-down: down
 
-# ─── Infra local (infraestrutura compartilhada devInfra) ──────
+# ─── Infra local (mesmo Docker Compose) ───────────────────────
 
-## infra: sobe a infra compartilhada (postgres, nats, mailpit, minio, redis)
+## infra: sobe apenas PostgreSQL e NATS do Compose local
 infra:
-	@echo "→ Subindo infraestrutura compartilhada em $(DEV_INFRA_DIR)..."
-	@docker compose -f $(DEV_INFRA_DIR)/docker-compose.yml up -d
-	@echo "✓ Postgres (5432) | NATS (4222) | Mailpit (1025/8025) | MinIO (9000/9001) | Redis (6379)"
+	@echo "→ Subindo PostgreSQL e NATS do Compose local..."
+	@docker compose up -d postgres nats
+	@echo "✓ Postgres (localhost:5433) | NATS (localhost:4222)"
 
-## infra-down: derruba a infra compartilhada
+## infra-down: para apenas PostgreSQL e NATS do Compose local
 infra-down:
-	@echo "→ Derrubando infraestrutura compartilhada em $(DEV_INFRA_DIR)..."
-	@docker compose -f $(DEV_INFRA_DIR)/docker-compose.yml down
+	@echo "→ Parando PostgreSQL e NATS do Compose local..."
+	@docker compose stop postgres nats
 
 # ─── Build ───────────────────────────────────────────────────
 

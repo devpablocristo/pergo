@@ -1,21 +1,56 @@
-networks:
-  shared-infra-net:
-    external: true
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: pergo_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d pergo_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8222/healthz > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   pergo:
     build: .
     container_name: omnigo_pergo
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    networks:
-      - shared-infra-net
+      - "${PERGO_HOST_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
     environment:
-      PERGO_DATABASE_URL: postgres://admin:admin@shared_postgres:5432/pergo_db?sslmode=disable
-      PERGO_NATS_URL: nats://shared_nats:4222
+      PERGO_DATABASE_URL: postgres://admin:admin@postgres:5432/pergo_db?sslmode=disable
+      PERGO_NATS_URL: nats://nats:4222
       PERGO_SERVER_PORT: "8080"
       PERGO_ADMIN_PASSWORD: ${PERGO_ADMIN_PASSWORD:-pergo-dev-2026}
       PERGO_EXTERNAL_URL: ${PERGO_EXTERNAL_URL:-http://localhost:8080}
       PERGO_KEK_BASE64: ${PERGO_KEK_BASE64}
       PERGO_WHATSAPP_MOCK_ENABLED: ${PERGO_WHATSAPP_MOCK_ENABLED:-false}
+
+volumes:
+  postgres_data:
+  nats_data:

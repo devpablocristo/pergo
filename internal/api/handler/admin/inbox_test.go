@@ -24,87 +24,6 @@ import (
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
-// ─── Mock repositories ───────────────────────────────────────────────────────
-
-type mockAuditRepo struct {
-	conversations []repository.ConversationSummary
-	thread        []repository.ThreadMessage
-}
-
-func (m *mockAuditRepo) ListConversations(_ context.Context, _ uuid.UUID, _ string) ([]repository.ConversationSummary, error) {
-	return m.conversations, nil
-}
-
-func (m *mockAuditRepo) ListThreadByContact(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ *uuid.UUID) ([]repository.ThreadMessage, error) {
-	return m.thread, nil
-}
-
-type mockSessionRepo struct {
-	lastReadAt    map[string]time.Time
-	updateCalled  bool
-	updateLastKey string
-}
-
-func newMockSessionRepo() *mockSessionRepo {
-	return &mockSessionRepo{lastReadAt: make(map[string]time.Time)}
-}
-
-func (m *mockSessionRepo) Get(_ context.Context, workspaceID uuid.UUID, from, channel, recipientIdentity string) (*repository.RecipientSession, error) {
-	key := from + "|" + channel + "|" + recipientIdentity
-	t, ok := m.lastReadAt[key]
-	if !ok {
-		return nil, repository.ErrSessionNotFound
-	}
-	return &repository.RecipientSession{
-		WorkspaceID:       workspaceID,
-		RecipientPhone:    from,
-		Channel:           channel,
-		RecipientIdentity: recipientIdentity,
-		LastReadAt:        &t,
-	}, nil
-}
-
-func (m *mockSessionRepo) UpdateLastReadAt(_ context.Context, _ uuid.UUID, from, channel, recipientIdentity string, _ time.Time) error {
-	m.updateCalled = true
-	m.updateLastKey = from + "|" + channel + "|" + recipientIdentity
-	return nil
-}
-
-type mockConnectionRepo struct {
-	conn *repository.Connection
-	err  error
-}
-
-func (m *mockConnectionRepo) GetBySenderIdentity(_ context.Context, _ uuid.UUID, _ string) (*repository.Connection, error) {
-	return m.conn, m.err
-}
-
-// mockPublisher records published messages.
-type mockPublisher struct {
-	published []publishedMsg
-}
-
-type publishedMsg struct {
-	subject string
-	data    []byte
-	traceID string
-}
-
-func (m *mockPublisher) Publish(_ context.Context, subject string, data []byte, traceID string) error {
-	m.published = append(m.published, publishedMsg{subject: subject, data: data, traceID: traceID})
-	return nil
-}
-
-// ─── InboxHandler adapter ─────────────────────────────────────────────────────
-// InboxHandler uses concrete types, so we provide the stubs by wrapping with
-// real struct types using unexported-field-friendly approach: use testable
-// builder that sets up a real InboxHandler backed by mock data via test-only
-// interfaces.
-
-// Note: InboxHandler uses *repository.AuditRepository (concrete), *repository.RecipientSessionRepository (concrete),
-// and *repository.ConnectionRepository (concrete), so we test at the HTTP level
-// using the helper functions below with nil values where DB operations are not needed.
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 func newEchoContext(method, path string, body string, contentType string) (*echo.Echo, *echo.Context, *httptest.ResponseRecorder) {
@@ -628,7 +547,7 @@ func TestInboxHandler_NewMessageSend_Template(t *testing.T) {
 			},
 		},
 	}
-	
+
 	// Create mock QueueMessage and verify payload serialization
 	qMsg := domain.QueueMessage{
 		WorkspaceID:    uuid.New(),
@@ -990,6 +909,3 @@ func TestInboxHandler_ToggleBot_HTTP(t *testing.T) {
 		t.Errorf("expected BotPausedAt to be nil after second toggle")
 	}
 }
-
-
-

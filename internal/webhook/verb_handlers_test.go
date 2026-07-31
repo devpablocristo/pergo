@@ -211,7 +211,7 @@ func TestTagHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create workspace: %v", err)
 	}
-	defer wsRepo.Delete(ctx, ws.ID)
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
 
 	c, err := contactRepo.ResolveContact(ctx, ws.ID, "telegram", "tag-sender", "", "", "")
 	if err != nil {
@@ -270,7 +270,7 @@ func TestCloseHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create workspace: %v", err)
 	}
-	defer wsRepo.Delete(ctx, ws.ID)
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
 
 	c, err := contactRepo.ResolveContact(ctx, ws.ID, "telegram", "close-sender", "", "", "")
 	if err != nil {
@@ -329,7 +329,7 @@ func TestPauseBotHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create workspace: %v", err)
 	}
-	defer wsRepo.Delete(ctx, ws.ID)
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
 
 	c, err := contactRepo.ResolveContact(ctx, ws.ID, "telegram", "pause-sender", "", "", "")
 	if err != nil {

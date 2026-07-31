@@ -382,7 +382,9 @@ func TestInboundProcessor_Process(t *testing.T) {
 		}
 
 		var payload2 inbound.InboundEventPayload
-		json.Unmarshal(pub2.published[0].data, &payload2)
+		if err := json.Unmarshal(pub2.published[0].data, &payload2); err != nil {
+			t.Fatalf("failed to decode inbound payload: %v", err)
+		}
 
 		// Verification: Location and Contacts should be retained
 		if payload2.Location == nil {
@@ -430,7 +432,9 @@ func TestInboundProcessor_Process(t *testing.T) {
 			t.Fatalf("expected 1 published event, got %d", len(pub.published))
 		}
 		var payload inbound.InboundEventPayload
-		json.Unmarshal(pub.published[0].data, &payload)
+		if err := json.Unmarshal(pub.published[0].data, &payload); err != nil {
+			t.Fatalf("failed to decode inbound payload: %v", err)
+		}
 
 		if payload.Body != "Text still goes through" {
 			t.Errorf("got body %q, want %q", payload.Body, "Text still goes through")

@@ -11,20 +11,6 @@ import (
 	"github.com/pablojhp.pergo/internal/api/handler/admin"
 )
 
-// TestTelemetryHandler_Construction verifies TelemetryHandler is constructable.
-func TestTelemetryHandler_Construction(t *testing.T) {
-	h := &admin.TelemetryHandler{
-		Manager:    nil,
-		Sessions:   nil,
-		QueueDepth: nil,
-		NC:         nil,
-		StartTime:  time.Now(),
-	}
-	if h == nil {
-		t.Fatal("expected non-nil TelemetryHandler")
-	}
-}
-
 // TestFormatDuration_Indirectly verifies telemetry handler can be called with nil deps.
 func TestTelemetryHandler_Index_NilDeps(t *testing.T) {
 	e := echo.New()

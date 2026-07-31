@@ -24,21 +24,6 @@ import (
 	"github.com/pablojhp.pergo/internal/session"
 )
 
-// TestDeviceHandler_Construction verifies fields are correct.
-func TestDeviceHandler_Construction(t *testing.T) {
-	h := &admin.DeviceHandler{
-		Sessions:      nil,
-		Manager:       nil,
-		Connections:   nil,
-		Publisher:     nil,
-		NC:            nil,
-		TemplatesRepo: nil,
-	}
-	if h == nil {
-		t.Fatal("expected non-nil DeviceHandler")
-	}
-}
-
 // TestDeviceHandler_GetQR_MissingPhone verifies BadRequest response when phone param is missing.
 func TestDeviceHandler_GetQR_MissingPhone(t *testing.T) {
 	e := echo.New()

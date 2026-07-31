@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -21,14 +22,14 @@ import (
 
 // InboxHandler holds dependencies for the conversational inbox.
 type InboxHandler struct {
-	Repo             *repository.AuditRepository
-	Sessions         *repository.RecipientSessionRepository
-	Workspaces       *repository.WorkspaceRepository
-	Connections      *repository.ConnectionRepository
-	Publisher        *queue.JetStreamPublisher
-	Templates        *repository.WABATemplateRepository
-	ContactRepo      *repository.ContactRepository
-	UserActionLogs   *repository.UserActionLogRepository
+	Repo           *repository.AuditRepository
+	Sessions       *repository.RecipientSessionRepository
+	Workspaces     *repository.WorkspaceRepository
+	Connections    *repository.ConnectionRepository
+	Publisher      *queue.JetStreamPublisher
+	Templates      *repository.WABATemplateRepository
+	ContactRepo    *repository.ContactRepository
+	UserActionLogs *repository.UserActionLogRepository
 }
 
 // resolveWorkspaceID reads the active workspace from the cookie.
@@ -91,7 +92,7 @@ func (h *InboxHandler) View(c *echo.Context) error {
 	}
 
 	inboxPage := pages.InboxPage(conversations, unreadMap, connectionFilter, unreadCount, nil, connections)
- 
+
 	if mw.IsHTMX(c) {
 		return mw.Render(c, http.StatusOK, pages.InboxContent(conversations, unreadMap, connectionFilter, unreadCount, nil, connections))
 	}
@@ -302,8 +303,8 @@ func (h *InboxHandler) SendMessage(c *echo.Context) error {
 	ctx := c.Request().Context()
 	workspaceID := resolveWorkspaceID(c)
 
-	contact := c.FormValue("contact")           // the recipient phone/chat ID (to field)
-	channel := c.FormValue("channel")            // whatsapp / whatsapp_cloud / telegram
+	contact := c.FormValue("contact")                      // the recipient phone/chat ID (to field)
+	channel := c.FormValue("channel")                      // whatsapp / whatsapp_cloud / telegram
 	recipientIdentity := c.FormValue("recipient_identity") // the bot/phone identity (sender_identity)
 	body := strings.TrimSpace(c.FormValue("body"))
 
@@ -400,7 +401,7 @@ func (h *InboxHandler) NewMessageModal(c *echo.Context) error {
 			}
 		}
 		if err != nil {
-			// Non-blocking log
+			slog.Warn("admin: failed to load WABA templates", "error", err, "workspace_id", workspaceID)
 		}
 	}
 
@@ -485,7 +486,7 @@ func (h *InboxHandler) NewMessageSend(c *echo.Context) error {
 	}
 
 	traceID := "new-chat-" + uuid.New().String()
-	
+
 	// Create NATS outbound QueueMessage
 	qMsg := domain.QueueMessage{
 		WorkspaceID:    workspaceID,
@@ -598,19 +599,6 @@ func (h *InboxHandler) MergeContacts(c *echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 
-// safeInitial returns the first character of a string, uppercased, safely.
-func safeInitial(s string) string {
-	runes := []rune(s)
-	if len(runes) == 0 {
-		return "?"
-	}
-	r := runes[0]
-	if r >= 'a' && r <= 'z' {
-		r -= 32
-	}
-	return string(r)
-}
-
 // escapeHTML performs minimal HTML escaping to prevent XSS in string-concatenated HTML.
 func escapeHTML(s string) string {
 	result := make([]byte, 0, len(s))
@@ -682,4 +670,3 @@ func (h *InboxHandler) ToggleBot(c *echo.Context) error {
 	contact.BotPausedAt = pausedAt
 	return mw.Render(c, http.StatusOK, components.BotStatusBadge(contact))
 }
-

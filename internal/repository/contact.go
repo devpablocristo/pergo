@@ -285,9 +285,7 @@ func (r *ContactRepository) ResolveTelegramChatID(ctx context.Context, workspace
 	// If numeric chat ID, return immediately
 	isNumeric := true
 	checkStr := clean
-	if strings.HasPrefix(checkStr, "-") {
-		checkStr = checkStr[1:]
-	}
+	checkStr = strings.TrimPrefix(checkStr, "-")
 	if checkStr == "" {
 		isNumeric = false
 	} else {

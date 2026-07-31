@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/pablojhp.pergo/internal/channel"
 	"github.com/pablojhp.pergo/internal/platform/storage"
@@ -96,16 +96,16 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 		"stagger", stagger,
 	)
 
-	var msg waE2E.Message
-
 	interMsg, err := buildInteractiveOrOverrideMsg(m)
 	if err != nil {
 		return "", err
 	}
-	
-	if interMsg != nil {
-		msg = *interMsg
-	} else if m.Media != nil {
+	msg := interMsg
+	if msg == nil {
+		msg = &waE2E.Message{}
+	}
+
+	if interMsg == nil && m.Media != nil {
 		if a.s3Client == nil {
 			return "", channel.NewTerminalError(fmt.Errorf("whatsapp: media storage client not configured"))
 		}
@@ -206,12 +206,12 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 				Caption:       caption,
 			}
 		}
-	} else {
+	} else if interMsg == nil {
 		body := m.Body
 		msg.Conversation = &body
 	}
 
-	respSend, err := wc.Client().SendMessage(ctx, recipientJID, &msg)
+	respSend, err := wc.Client().SendMessage(ctx, recipientJID, msg)
 	if err != nil {
 		a.log.Error("whatsapp: send failed",
 			"error", err,

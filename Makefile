@@ -2,7 +2,9 @@
 #  PerGo — Makefile
 #  Uso:
 #    make dev        → hot-reload (carrega .env automaticamente)
-#    make prod       → build + sobe tudo via docker compose
+#    make up         → build + sobe o app via docker compose
+#    make down       → para o app via docker compose (preserva volumes)
+#    make prod       → alias de make up
 #    make infra      → sobe só postgres + nats (sem o app)
 #    make infra-down → derruba infra
 #    make build      → compila o binário para ./bin/pergo
@@ -12,7 +14,7 @@
 #    make lint       → golangci-lint
 # ─────────────────────────────────────────────────────────────
 
-.PHONY: dev prod infra infra-down build generate test test-race lint clean help
+.PHONY: dev up down prod prod-logs prod-down infra infra-down build generate test test-race lint clean help
 
 # Carrega variáveis do .env se ele existir (sem expor no shell pai)
 ifneq (,$(wildcard .env))
@@ -39,19 +41,26 @@ watch: dev
 
 # ─── Produção ────────────────────────────────────────────────
 
-## prod: build da imagem Docker e sobe tudo via docker compose
-prod:
-	@echo "→ Fazendo build e subindo em produção..."
+## up: build da imagem e sobe PerGo via Docker Compose
+up:
+	@echo "→ Fazendo build e subindo PerGo via Docker Compose..."
 	@docker compose --env-file .env up --build -d
 	@echo "✓ Rodando em http://localhost:$${PERGO_SERVER_PORT:-8080}"
+
+## down: para PerGo via Docker Compose sem apagar volumes
+down:
+	@echo "→ Parando PerGo via Docker Compose (volumes preservados)..."
+	@docker compose --env-file .env down
+
+## prod: alias de make up
+prod: up
 
 ## prod-logs: acompanha os logs do container em produção
 prod-logs:
 	@docker compose --env-file .env logs -f pergo
 
-## prod-down: derruba todos os containers
-prod-down:
-	@docker compose --env-file .env down
+## prod-down: alias de make down
+prod-down: down
 
 # ─── Infra local (infraestrutura compartilhada devInfra) ──────
 

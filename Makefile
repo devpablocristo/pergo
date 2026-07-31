@@ -49,8 +49,12 @@ up:
 
 ## down: para PerGo via Docker Compose sem apagar volumes
 down:
-	@echo "→ Parando PerGo via Docker Compose (volumes preservados)..."
-	@docker compose --env-file .env down
+	@if [ -n "$$(docker compose --env-file .env ps -aq)" ]; then \
+		echo "→ Parando PerGo via Docker Compose (volumes preservados)..."; \
+		docker compose --env-file .env down; \
+	else \
+		echo "✓ PerGo ya estaba detenido."; \
+	fi
 
 ## prod: alias de make up
 prod: up

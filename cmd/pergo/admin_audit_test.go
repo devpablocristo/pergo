@@ -70,7 +70,7 @@ func setupAuditTestRoutes(t *testing.T) *echo.Echo {
 		t.Fatalf("failed to create sql.DB: %v", err)
 	}
 	_ = postgres.RunMigrations(db)
-	db.Close()
+	_ = db.Close()
 
 	auditRepo := repository.NewAuditRepository(pool)
 	wsRepo := repository.NewWorkspaceRepository(pool)

@@ -43,7 +43,7 @@ func NewCampaignWorker(
 	campaignRepo *repository.CampaignRepository,
 	connectionsRepo *repository.ConnectionRepository,
 	dispatchRepo *repository.MessageDispatchRepository,
-	publisher    *JetStreamPublisher,
+	publisher *JetStreamPublisher,
 ) *CampaignWorker {
 	ctx, cancel := context.WithCancel(ctx)
 	w := &CampaignWorker{
@@ -152,7 +152,7 @@ func (w *CampaignWorker) processBatch(ctx context.Context, msg jetstream.Msg) {
 
 		// Resolve message details
 		var templateName *string
-		var variablesJSON map[string]string = recipient.Variables
+		var variablesJSON = recipient.Variables
 
 		qMsg := domain.QueueMessage{
 			WorkspaceID:    task.WorkspaceID,

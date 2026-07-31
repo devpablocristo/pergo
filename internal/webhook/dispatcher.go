@@ -54,14 +54,14 @@ var (
 )
 
 type WebhookDeliveryTask struct {
-	ID             uuid.UUID       `json:"id"`
-	SubscriptionID uuid.UUID       `json:"subscription_id"`
-	WorkspaceID    uuid.UUID       `json:"workspace_id"`
-	Event          string          `json:"event"`
-	TraceID        string          `json:"trace_id"`
-	MessageID      string          `json:"message_id"`
-	Payload        []byte          `json:"payload"`
-	Mode           string          `json:"mode"` // "inbound" | "outbound"
+	ID             uuid.UUID `json:"id"`
+	SubscriptionID uuid.UUID `json:"subscription_id"`
+	WorkspaceID    uuid.UUID `json:"workspace_id"`
+	Event          string    `json:"event"`
+	TraceID        string    `json:"trace_id"`
+	MessageID      string    `json:"message_id"`
+	Payload        []byte    `json:"payload"`
+	Mode           string    `json:"mode"` // "inbound" | "outbound"
 }
 
 // WebhookDispatcher defines the interface for webhook payload processing and delivery.
@@ -167,7 +167,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, task WebhookDeliveryTa
 	if err != nil {
 		return fmt.Errorf("http dispatch error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status}

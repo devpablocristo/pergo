@@ -32,7 +32,7 @@ func TestS3ClientUploadAndDownload(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to download: %v", err)
 		}
-		defer body.Close()
+		defer func() { _ = body.Close() }()
 
 		retrieved, err := io.ReadAll(body)
 		if err != nil {

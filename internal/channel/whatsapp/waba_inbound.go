@@ -90,10 +90,10 @@ type ValueData struct {
 		} `json:"contacts,omitempty"`
 	} `json:"messages,omitempty"`
 	Statuses []struct {
-		ID           string `json:"id"`
-		Status       string `json:"status"` // "sent", "delivered", "read", "failed"
-		RecipientID  string `json:"recipient_id"`
-		Timestamp    string `json:"timestamp"`
+		ID          string `json:"id"`
+		Status      string `json:"status"` // "sent", "delivered", "read", "failed"
+		RecipientID string `json:"recipient_id"`
+		Timestamp   string `json:"timestamp"`
 	} `json:"statuses,omitempty"`
 }
 
@@ -244,7 +244,7 @@ func (a *WABAInboundAdapter) fetchWABADownloadURL(ctx context.Context, mediaID, 
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("status: %d", resp.StatusCode)

@@ -37,7 +37,7 @@ type Connection struct {
 
 // ConnectionRepository manages CRUD operations and credentials crypto for Connection.
 type ConnectionRepository struct {
-	pool      *pgxpool.Pool
+	pool     *pgxpool.Pool
 	provider CredentialProvider
 }
 
@@ -62,7 +62,7 @@ func (r *ConnectionRepository) Create(ctx context.Context, c *Connection) error 
 
 	var ciphertext []byte
 	var keyID string
-	var keyVersion int = 1
+	var keyVersion = 1
 
 	if len(c.Credentials) > 0 {
 		var err error
@@ -134,7 +134,6 @@ func (r *ConnectionRepository) GetByJID(ctx context.Context, jid string) (*Conne
 	row := r.pool.QueryRow(ctx, query, jid)
 	return r.scanAndDecrypt(row)
 }
-
 
 // GetDefaultChannelConnection retrieves the default connection for a given workspace and channel.
 func (r *ConnectionRepository) GetDefaultChannelConnection(ctx context.Context, workspaceID uuid.UUID, channel string) (*Connection, error) {

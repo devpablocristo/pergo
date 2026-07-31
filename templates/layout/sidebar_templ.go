@@ -12,26 +12,27 @@ import (
 	"context"
 	"fmt"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 	"github.com/pablojhp.pergo/templates/components"
 	"strings"
 )
 
 func getActivePath(ctx context.Context) string {
-	if val, ok := ctx.Value("active_path").(string); ok {
+	if val, ok := ctx.Value(contextkey.ActivePath).(string); ok {
 		return val
 	}
 	return ""
 }
 
 func getActiveWorkspace(ctx context.Context) *repository.Workspace {
-	if val, ok := ctx.Value("active_workspace").(*repository.Workspace); ok {
+	if val, ok := ctx.Value(contextkey.ActiveWorkspace).(*repository.Workspace); ok {
 		return val
 	}
 	return nil
 }
 
 func getWorkspacesList(ctx context.Context) []repository.Workspace {
-	if val, ok := ctx.Value("workspaces_list").([]repository.Workspace); ok {
+	if val, ok := ctx.Value(contextkey.WorkspacesList).([]repository.Workspace); ok {
 		return val
 	}
 	return nil
@@ -389,7 +390,7 @@ func Sidebar() templ.Component {
 			var templ_7745c5c3_Var25 templ.SafeURL
 			templ_7745c5c3_Var25, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL(fmt.Sprintf("/admin/workspaces/%s/integrations/chatwoot", ws.ID.String())))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 152, Col: 105}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 153, Col: 105}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var25))
 			if templ_7745c5c3_Err != nil {
@@ -424,7 +425,7 @@ func Sidebar() templ.Component {
 			var templ_7745c5c3_Var28 templ.SafeURL
 			templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinURLErrs(templ.SafeURL(fmt.Sprintf("/admin/workspaces/%s/integrations/typebot", ws.ID.String())))
 			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 155, Col: 104}
+				return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 156, Col: 104}
 			}
 			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
 			if templ_7745c5c3_Err != nil {
@@ -499,7 +500,7 @@ func WorkspaceSelector(activeWorkspace *repository.Workspace, workspaces []repos
 					var templ_7745c5c3_Var31 string
 					templ_7745c5c3_Var31, templ_7745c5c3_Err = templ.ResolveAttributeValue(ws.ID.String())
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 206, Col: 36}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 207, Col: 36}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var31)
 					if templ_7745c5c3_Err != nil {
@@ -512,7 +513,7 @@ func WorkspaceSelector(activeWorkspace *repository.Workspace, workspaces []repos
 					var templ_7745c5c3_Var32 string
 					templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.JoinStringErrs(ws.Name)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 206, Col: 57}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 207, Col: 57}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var32))
 					if templ_7745c5c3_Err != nil {
@@ -530,7 +531,7 @@ func WorkspaceSelector(activeWorkspace *repository.Workspace, workspaces []repos
 					var templ_7745c5c3_Var33 string
 					templ_7745c5c3_Var33, templ_7745c5c3_Err = templ.ResolveAttributeValue(ws.ID.String())
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 208, Col: 36}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 209, Col: 36}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var33)
 					if templ_7745c5c3_Err != nil {
@@ -543,7 +544,7 @@ func WorkspaceSelector(activeWorkspace *repository.Workspace, workspaces []repos
 					var templ_7745c5c3_Var34 string
 					templ_7745c5c3_Var34, templ_7745c5c3_Err = templ.JoinStringErrs(ws.Name)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 208, Col: 48}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `templates/layout/sidebar.templ`, Line: 209, Col: 48}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var34))
 					if templ_7745c5c3_Err != nil {

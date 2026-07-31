@@ -46,7 +46,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		pool.Close()
@@ -433,7 +433,7 @@ func TestWABADispatch(t *testing.T) {
 			var req struct {
 				Type        string `json:"type"`
 				Interactive *struct {
-					Type   string `json:"type"`
+					Type   string                `json:"type"`
 					Body   struct{ Text string } `json:"body"`
 					Action struct {
 						Buttons []struct {
@@ -713,4 +713,3 @@ func TestWABAInboundAdapterStatuses(t *testing.T) {
 		}
 	}
 }
-

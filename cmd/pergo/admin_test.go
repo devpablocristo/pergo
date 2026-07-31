@@ -16,6 +16,7 @@ import (
 	"github.com/pablojhp.pergo/internal/platform/audit"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 )
 
 // setupTestRoutes creates a real Echo instance with admin routes wired up.
@@ -44,7 +45,7 @@ func setupTestRoutes(t *testing.T) *echo.Echo {
 	adminGroup.Use(mw.SessionAuthMiddleware())
 	adminGroup.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			ctx := context.WithValue(c.Request().Context(), "active_path", c.Request().URL.Path)
+			ctx := context.WithValue(c.Request().Context(), contextkey.ActivePath, c.Request().URL.Path)
 			c.SetRequest(c.Request().WithContext(ctx))
 			return next(c)
 		}
@@ -95,7 +96,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		pool.Close()
@@ -337,4 +338,3 @@ func TestPlaygroundRouteDecommissioned(t *testing.T) {
 		t.Errorf("expected 404 StatusNotFound, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
-

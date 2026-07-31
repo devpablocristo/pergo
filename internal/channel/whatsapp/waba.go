@@ -38,9 +38,9 @@ type WABAConfig struct {
 }
 
 type wabaMessageRequest struct {
-	MessagingProduct string        `json:"messaging_product"`
-	RecipientType    string        `json:"recipient_type"`
-	To               string        `json:"to"`
+	MessagingProduct string           `json:"messaging_product"`
+	RecipientType    string           `json:"recipient_type"`
+	To               string           `json:"to"`
 	Type             string           `json:"type"`
 	Text             *wabaText        `json:"text,omitempty"`
 	Template         *wabaTemplate    `json:"template,omitempty"`
@@ -109,7 +109,7 @@ type wabaInteractiveButtonReply struct {
 }
 
 type wabaInteractiveSection struct {
-	Title string                     `json:"title,omitempty"`
+	Title string                      `json:"title,omitempty"`
 	Rows  []wabaInteractiveSectionRow `json:"rows"`
 }
 
@@ -276,7 +276,7 @@ func (a *WABAAdapter) Dispatch(ctx context.Context, m *channel.MessagePayload) (
 		reqPayload.Template = &tmpl
 	} else if m.Interactive != nil {
 		reqPayload.Type = "interactive"
-		
+
 		var header, footer *wabaInteractiveText
 		if m.Interactive.Header != nil {
 			header = &wabaInteractiveText{
@@ -293,7 +293,7 @@ func (a *WABAAdapter) Dispatch(ctx context.Context, m *channel.MessagePayload) (
 		action := wabaInteractiveAction{
 			Button: m.Interactive.Action.Button,
 		}
-		
+
 		for _, b := range m.Interactive.Action.Buttons {
 			action.Buttons = append(action.Buttons, wabaInteractiveReplyButton{
 				Type: "reply",
@@ -498,7 +498,7 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -526,7 +526,7 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 
 func (a *WABAAdapter) classifyError(statusCode int, errResp *MetaErrorResponse) error {
 	metaErr := errResp.Error
-	err := fmt.Errorf("Meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
+	err := fmt.Errorf("meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
 
 	if metaErr.Code == 131030 ||
 		metaErr.Code == 131047 ||

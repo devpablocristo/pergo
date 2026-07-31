@@ -71,7 +71,7 @@ func TestConfigureProxy_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 
 	proxyAddr := l.Addr().String()
 	authChan := make(chan bool, 1)
@@ -81,7 +81,7 @@ func TestConfigureProxy_Integration(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		buf := make([]byte, 256)
 		if _, err := io.ReadFull(conn, buf[:2]); err != nil {

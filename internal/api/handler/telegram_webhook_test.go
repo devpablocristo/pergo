@@ -51,7 +51,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		pool.Close()
@@ -255,7 +255,7 @@ func TestInboundAuditLogging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to write audit event: %v", err)
 	}
-	writer.Close() // Drains and flushes
+	_ = writer.Close() // Drains and flushes
 
 	entries, err = auditQuerier.ListRecent(ctx, 100)
 	if err != nil {

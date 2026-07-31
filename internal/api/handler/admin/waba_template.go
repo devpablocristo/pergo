@@ -151,7 +151,7 @@ func (h *WABATemplateHandler) Create(c *echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusBadGateway, "failed to communicate with Meta API: "+err.Error())
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -261,7 +261,7 @@ func (h *WABATemplateHandler) Sync(c *echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusBadGateway, "failed to connect to Meta API: "+err.Error())
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

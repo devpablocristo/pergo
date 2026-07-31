@@ -36,7 +36,7 @@ func setupWorkspaceRoutes(t *testing.T) *echo.Echo {
 	// dollar-quoted PL/pgSQL in embedded SQL (goose limitation), but that's
 	// fine for tests since we only need the core schema.
 	_ = postgres.RunMigrations(db)
-	db.Close()
+	_ = db.Close()
 
 	e := echo.New()
 	e.Use(mw.HTMXMiddleware())

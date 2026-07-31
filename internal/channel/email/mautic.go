@@ -33,11 +33,11 @@ func NewMauticProvider(cfg MauticConfig) *MauticProvider {
 }
 
 type mauticSendRequest struct {
-	Subject  string            `json:"subject"`
-	Body     string            `json:"body"`
-	PlainBody string           `json:"plainText"`
-	To       []string          `json:"to"`
-	Headers  map[string]string `json:"headers,omitempty"`
+	Subject   string            `json:"subject"`
+	Body      string            `json:"body"`
+	PlainBody string            `json:"plainText"`
+	To        []string          `json:"to"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 // Send dispatches an email via Mautic API.
@@ -77,13 +77,13 @@ func (m *MauticProvider) Send(ctx context.Context, msg *EmailMessage) (string, e
 
 	resp, err := m.config.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("Mautic HTTP request failed: %w", err)
+		return "", fmt.Errorf("mautic HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("Mautic API returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("mautic API returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return providerMsgID, nil

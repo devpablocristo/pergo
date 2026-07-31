@@ -27,7 +27,7 @@ func TestPprofServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /debug/pprof/ failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -51,7 +51,7 @@ func TestExpvarHandler(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /debug/vars failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -85,7 +85,7 @@ func TestAuditDropCounter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /debug/vars failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var data map[string]json.RawMessage
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {

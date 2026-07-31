@@ -397,7 +397,7 @@ func mustPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("NewSQLDB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := postgres.RunMigrations(db); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}

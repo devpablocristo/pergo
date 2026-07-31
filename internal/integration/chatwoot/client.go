@@ -53,7 +53,7 @@ func (c *ChatwootClient) SearchContact(ctx context.Context, identifier string) (
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkResponse(resp); err != nil {
 		return 0, err
@@ -116,7 +116,7 @@ func (c *ChatwootClient) CreateContact(ctx context.Context, identifier string, n
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkResponse(resp); err != nil {
 		return 0, err
@@ -167,7 +167,7 @@ func (c *ChatwootClient) UpdateContact(ctx context.Context, chatwootContactID in
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkResponse(resp); err != nil {
 		return 0, err
@@ -213,7 +213,7 @@ func (c *ChatwootClient) CreateConversation(ctx context.Context, contactID int64
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkResponse(resp); err != nil {
 		return 0, err
@@ -256,7 +256,7 @@ func (c *ChatwootClient) PostMessage(ctx context.Context, conversationID int64, 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := c.checkResponse(resp); err != nil {
 		return err

@@ -18,9 +18,9 @@ import (
 
 // TelegramInboundAdapter implements channel.InboundAdapter for Telegram.
 type TelegramInboundAdapter struct {
-	downloader          media.Downloader
-	client              *http.Client
-	telegramBaseURL     string
+	downloader      media.Downloader
+	client          *http.Client
+	telegramBaseURL string
 }
 
 // NewTelegramInboundAdapter creates a new TelegramInboundAdapter.
@@ -28,9 +28,9 @@ func NewTelegramInboundAdapter(
 	downloader media.Downloader,
 ) *TelegramInboundAdapter {
 	return &TelegramInboundAdapter{
-		downloader:          downloader,
-		client:              &http.Client{Timeout: 30 * time.Second},
-		telegramBaseURL:     "https://api.telegram.org",
+		downloader:      downloader,
+		client:          &http.Client{Timeout: 30 * time.Second},
+		telegramBaseURL: "https://api.telegram.org",
 	}
 }
 
@@ -66,13 +66,13 @@ type telegramMessage struct {
 	From            *telegramUser     `json:"from,omitempty"`
 	Chat            *telegramChat     `json:"chat"`
 	Text            string            `json:"text,omitempty"`
-	Caption   string            `json:"caption,omitempty"`
-	Photo     []telegramPhoto   `json:"photo,omitempty"`
-	Document  *telegramDocument `json:"document,omitempty"`
-	Audio     *telegramAudio    `json:"audio,omitempty"`
-	Video     *telegramVideo    `json:"video,omitempty"`
-	Location  *telegramLocation `json:"location,omitempty"`
-	Contact   *telegramContact  `json:"contact,omitempty"`
+	Caption         string            `json:"caption,omitempty"`
+	Photo           []telegramPhoto   `json:"photo,omitempty"`
+	Document        *telegramDocument `json:"document,omitempty"`
+	Audio           *telegramAudio    `json:"audio,omitempty"`
+	Video           *telegramVideo    `json:"video,omitempty"`
+	Location        *telegramLocation `json:"location,omitempty"`
+	Contact         *telegramContact  `json:"contact,omitempty"`
 }
 
 type telegramPhoto struct {
@@ -184,7 +184,7 @@ func (a *TelegramInboundAdapter) Parse(
 				req.Header.Set("Content-Type", "application/json")
 				resp, err := a.client.Do(req)
 				if err == nil {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 			}
 		}(callbackID, config.Token)
@@ -364,7 +364,7 @@ func (a *TelegramInboundAdapter) downloadTelegramFile(ctx context.Context, fileI
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("getFile error status: %d", resp.StatusCode)
@@ -382,7 +382,7 @@ func (a *TelegramInboundAdapter) downloadTelegramFile(ctx context.Context, fileI
 	}
 
 	downloadURL := fmt.Sprintf("%s/file/bot%s/%s", a.telegramBaseURL, token, fileInfo.Result.FilePath)
-	
+
 	if a.downloader == nil {
 		return nil, fmt.Errorf("downloader is not configured")
 	}

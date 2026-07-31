@@ -48,7 +48,7 @@ func TestConnectionMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
 	dir, err := filepath.Abs("../platform/postgres/migrations")

@@ -123,7 +123,7 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 
 	// 5. Setup handler
 	auditWriter := audit.NewWriter(pool, 10, 1)
-	defer auditWriter.Close()
+	defer func() { _ = auditWriter.Close() }()
 
 	inboundProcessor := inbound.NewInboundProcessor(dedupRepo, wsRepo, nil, publisher, auditWriter, sessRepo, contactRepo, dispatchRepo, nil)
 	h := handler.NewWABAWebhookHandler(connRepo, inboundProcessor, nil)

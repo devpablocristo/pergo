@@ -46,7 +46,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		pool.Close()
@@ -256,7 +256,7 @@ func TestTelegramDispatch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to read photo file from multipart form: %v", err)
 			}
-			defer file.Close()
+			defer func() { _ = file.Close() }()
 
 			if header.Filename != "custom_filename.png" {
 				t.Errorf("expected filename custom_filename.png, got %s", header.Filename)

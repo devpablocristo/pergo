@@ -98,7 +98,7 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 	_ = connRepo.Create(ctx, conn)
 
 	auditWriter := audit.NewWriter(pool, 100, 1)
-	defer auditWriter.Close()
+	defer func() { _ = auditWriter.Close() }()
 
 	mediaEngine := media.NewDefaultEngine(s3Client)
 	dispatchRepo := repository.NewMessageDispatchRepository(pool)

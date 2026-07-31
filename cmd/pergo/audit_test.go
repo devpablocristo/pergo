@@ -149,7 +149,7 @@ func TestBatchWriterFlushAt100(t *testing.T) {
 	traceID := uuid.New().String()
 
 	writer := audit.NewWriter(pool, 200, 1)
-	defer writer.Close()
+	defer func() { _ = writer.Close() }()
 
 	// Send exactly 100 events
 	for i := 0; i < 100; i++ {
@@ -404,7 +404,7 @@ func mustAuditPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("NewSQLDB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := postgres.RunMigrations(db); err != nil {
 		t.Fatalf("RunMigrations: %v", err)
 	}

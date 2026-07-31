@@ -109,7 +109,7 @@ func (s *SESProvider) Send(ctx context.Context, msg *EmailMessage) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("SES HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)

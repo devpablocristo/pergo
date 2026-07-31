@@ -14,6 +14,7 @@ import (
 
 	"github.com/pablojhp.pergo/internal/api/handler/admin"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 )
 
 func TestUserLogsHandler(t *testing.T) {
@@ -75,9 +76,9 @@ func TestUserLogsHandler(t *testing.T) {
 		c := e.NewContext(req, rec)
 
 		// Set context values to avoid layout crash
-		reqCtx := context.WithValue(req.Context(), "active_path", "/admin/logs/actions")
-		reqCtx = context.WithValue(reqCtx, "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "workspaces_list", []repository.Workspace{*ws})
+		reqCtx := context.WithValue(req.Context(), contextkey.ActivePath, "/admin/logs/actions")
+		reqCtx = context.WithValue(reqCtx, contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.WorkspacesList, []repository.Workspace{*ws})
 		c.SetRequest(req.WithContext(reqCtx))
 
 		if err := h.List(c); err != nil {

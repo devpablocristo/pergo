@@ -34,9 +34,9 @@ type instagramMessageRequest struct {
 		ID string `json:"id"`
 	} `json:"recipient"`
 	Message struct {
-		Text        string                 `json:"text,omitempty"`
-		Attachment  *instagramAttachment   `json:"attachment,omitempty"`
-		Interactive *instagramInteractive  `json:"interactive,omitempty"`
+		Text        string                `json:"text,omitempty"`
+		Attachment  *instagramAttachment  `json:"attachment,omitempty"`
+		Interactive *instagramInteractive `json:"interactive,omitempty"`
 	} `json:"message"`
 	MessagingType string `json:"messaging_type,omitempty"`
 }
@@ -44,13 +44,13 @@ type instagramMessageRequest struct {
 type instagramAttachment struct {
 	Type    string `json:"type"` // "image", "audio", "video", "file"
 	Payload struct {
-		URL string `json:"url"`
-		IsReusable bool `json:"is_reusable,omitempty"`
+		URL        string `json:"url"`
+		IsReusable bool   `json:"is_reusable,omitempty"`
 	} `json:"payload"`
 }
 
 type instagramInteractive struct {
-	Type   string                   `json:"type"` // "button", "list"
+	Type   string                    `json:"type"` // "button", "list"
 	Header *instagramInteractiveText `json:"header,omitempty"`
 	Body   *instagramInteractiveText `json:"body,omitempty"`
 	Footer *instagramInteractiveText `json:"footer,omitempty"`
@@ -62,13 +62,13 @@ type instagramInteractiveText struct {
 }
 
 type instagramAction struct {
-	Button   string                       `json:"button,omitempty"`
+	Button   string                            `json:"button,omitempty"`
 	Buttons  []instagramInteractiveReplyButton `json:"buttons,omitempty"`
 	Sections []instagramInteractiveSection     `json:"sections,omitempty"`
 }
 
 type instagramInteractiveReplyButton struct {
-	Type  string                     `json:"type"`
+	Type  string                          `json:"type"`
 	Reply instagramInteractiveButtonReply `json:"reply"`
 }
 
@@ -78,7 +78,7 @@ type instagramInteractiveButtonReply struct {
 }
 
 type instagramInteractiveSection struct {
-	Title string                     `json:"title,omitempty"`
+	Title string                           `json:"title,omitempty"`
 	Rows  []instagramInteractiveSectionRow `json:"rows"`
 }
 
@@ -150,7 +150,7 @@ func (a *InstagramAdapter) Dispatch(ctx context.Context, m *channel.MessagePaylo
 		if m.Interactive.Footer != nil {
 			reqPayload.Message.Interactive.Footer = &instagramInteractiveText{Text: m.Interactive.Footer.Text}
 		}
-		
+
 		action := instagramAction{
 			Button: m.Interactive.Action.Button,
 		}
@@ -184,17 +184,17 @@ func (a *InstagramAdapter) Dispatch(ctx context.Context, m *channel.MessagePaylo
 			}
 			mediaURL = base + mediaURL
 		}
-		
+
 		mediaType := m.Media.MediaType
 		if mediaType == "document" {
 			mediaType = "file"
 		}
-		
+
 		reqPayload.Message.Attachment = &instagramAttachment{
 			Type: mediaType,
 		}
 		reqPayload.Message.Attachment.Payload.URL = mediaURL
-		
+
 	} else {
 		reqPayload.Message.Text = m.Body
 	}
@@ -221,7 +221,7 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -247,7 +247,7 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 
 func (a *InstagramAdapter) classifyError(statusCode int, errResp *MetaErrorResponse) error {
 	metaErr := errResp.Error
-	err := fmt.Errorf("Meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
+	err := fmt.Errorf("meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
 
 	if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
 		return err

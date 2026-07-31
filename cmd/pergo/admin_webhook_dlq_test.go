@@ -50,7 +50,7 @@ func setupWebhookRoutes(t *testing.T) (*echo.Echo, *repository.WebhookDLQReposit
 		t.Fatalf("failed to create sql.DB: %v", err)
 	}
 	_ = postgres.RunMigrations(db)
-	db.Close()
+	_ = db.Close()
 
 	e := echo.New()
 	e.Use(mw.HTMXMiddleware())

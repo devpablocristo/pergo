@@ -56,7 +56,7 @@ func getTestPool(t *testing.T) *pgxpool.Pool {
 		pool.Close()
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		pool.Close()
@@ -106,7 +106,7 @@ func TestChatwootSyncer(t *testing.T) {
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			
+
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/accounts/1/contacts/search":
 				searchCount++

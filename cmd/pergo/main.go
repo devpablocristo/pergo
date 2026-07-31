@@ -47,6 +47,7 @@ import (
 	"github.com/pablojhp.pergo/internal/platform/storage"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/session"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 	"github.com/pablojhp.pergo/internal/webhook"
 	"github.com/pablojhp.pergo/templates/pages"
 )
@@ -121,7 +122,7 @@ func main() {
 		slog.Error("failed to create stdlib sql.DB", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		slog.Error("migrations failed", "error", err)
@@ -448,7 +449,7 @@ func main() {
 	adminGroup.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			ctx := c.Request().Context()
-			ctx = context.WithValue(ctx, "active_path", c.Request().URL.Path)
+			ctx = context.WithValue(ctx, contextkey.ActivePath, c.Request().URL.Path)
 
 			// Get active workspace and workspaces list to avoid HTMX reload flash
 			var ws *repository.Workspace
@@ -468,10 +469,10 @@ func main() {
 
 			// Inject into context
 			if ws != nil {
-				ctx = context.WithValue(ctx, "active_workspace", ws)
+				ctx = context.WithValue(ctx, contextkey.ActiveWorkspace, ws)
 			}
 			if len(workspaces) > 0 {
-				ctx = context.WithValue(ctx, "workspaces_list", workspaces)
+				ctx = context.WithValue(ctx, contextkey.WorkspacesList, workspaces)
 			}
 
 			c.SetRequest(c.Request().WithContext(ctx))
@@ -730,13 +731,6 @@ func runServer(ctx context.Context, pool *pgxpool.Pool, db *sql.DB) error {
 	_ = db
 	<-ctx.Done()
 	return nil
-}
-
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // natsConn wraps *nats.Conn to satisfy the handler.NATSConn interface.

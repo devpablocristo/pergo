@@ -96,7 +96,7 @@ func TestMessageHandler_CreateWithMedia(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected S3 object to exist at key %s, got err %v", key, err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		if ct != "image/png" {
 			t.Errorf("expected S3 contentType image/png, got %s", ct)

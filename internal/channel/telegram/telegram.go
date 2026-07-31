@@ -112,7 +112,7 @@ func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 		if err != nil {
 			return "", fmt.Errorf("telegram media download from S3 failed: %w", err)
 		}
-		defer bodyRC.Close()
+		defer func() { _ = bodyRC.Close() }()
 
 		var bodyBuf bytes.Buffer
 		writer := multipart.NewWriter(&bodyBuf)
@@ -260,7 +260,7 @@ func (a *TelegramAdapter) executeRequest(req *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -279,7 +279,7 @@ func (a *TelegramAdapter) executeRequest(req *http.Request) (string, error) {
 }
 
 func (a *TelegramAdapter) classifyError(statusCode int, errResp *TelegramErrorResponse) error {
-	err := fmt.Errorf("Telegram API error (code: %d): %s", errResp.ErrorCode, errResp.Description)
+	err := fmt.Errorf("telegram API error (code: %d): %s", errResp.ErrorCode, errResp.Description)
 
 	// Explicit check based on known Telegram error codes
 	// 400: Bad Request (chat not found, etc.)

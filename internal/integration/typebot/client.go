@@ -69,7 +69,7 @@ func NewClient() *Client {
 
 func (c *Client) StartChat(ctx context.Context, apiURL, botID, publicToken string, req StartChatRequest) (string, []Message, error) {
 	url := fmt.Sprintf("%s/api/v1/typebots/%s/startChat", apiURL, botID)
-	
+
 	b, err := json.Marshal(req)
 	if err != nil {
 		return "", nil, err
@@ -88,7 +88,7 @@ func (c *Client) StartChat(ctx context.Context, apiURL, botID, publicToken strin
 	if err != nil {
 		return "", nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
@@ -105,7 +105,7 @@ func (c *Client) StartChat(ctx context.Context, apiURL, botID, publicToken strin
 
 func (c *Client) ContinueChat(ctx context.Context, apiURL, sessionID, publicToken string, messageText string) ([]Message, error) {
 	url := fmt.Sprintf("%s/api/v1/sessions/%s/continueChat", apiURL, sessionID)
-	
+
 	reqBody := ContinueChatRequest{
 		Message: ContinueChatMessage{
 			Type: "text",
@@ -127,7 +127,7 @@ func (c *Client) ContinueChat(ctx context.Context, apiURL, sessionID, publicToke
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("session expired: status 404")

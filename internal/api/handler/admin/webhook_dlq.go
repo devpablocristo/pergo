@@ -284,7 +284,7 @@ func (h *WebhookDLQHandler) TestSubscription(c *echo.Context) error {
 			nil,
 		))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	bodyStr := string(bodyBytes)

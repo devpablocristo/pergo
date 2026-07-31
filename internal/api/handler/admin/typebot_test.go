@@ -17,6 +17,7 @@ import (
 	typebot "github.com/pablojhp.pergo/internal/integration/typebot"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 )
 
 func TestTypebotSettingsHandler(t *testing.T) {
@@ -77,8 +78,8 @@ func TestTypebotSettingsHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.GetSettings(c)
@@ -116,8 +117,8 @@ func TestTypebotSettingsHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.PostSettings(c)
@@ -152,8 +153,8 @@ func TestTypebotSettingsHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.PostSettings(c)
@@ -191,8 +192,8 @@ func TestTypebotSettingsHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.PostSettings(c)
@@ -255,8 +256,8 @@ func TestTypebotSettingsHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.GetSettings(c)

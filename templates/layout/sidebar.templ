@@ -4,26 +4,27 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/templates/components"
 )
 
 func getActivePath(ctx context.Context) string {
-	if val, ok := ctx.Value("active_path").(string); ok {
+	if val, ok := ctx.Value(contextkey.ActivePath).(string); ok {
 		return val
 	}
 	return ""
 }
 
 func getActiveWorkspace(ctx context.Context) *repository.Workspace {
-	if val, ok := ctx.Value("active_workspace").(*repository.Workspace); ok {
+	if val, ok := ctx.Value(contextkey.ActiveWorkspace).(*repository.Workspace); ok {
 		return val
 	}
 	return nil
 }
 
 func getWorkspacesList(ctx context.Context) []repository.Workspace {
-	if val, ok := ctx.Value("workspaces_list").([]repository.Workspace); ok {
+	if val, ok := ctx.Value(contextkey.WorkspacesList).([]repository.Workspace); ok {
 		return val
 	}
 	return nil

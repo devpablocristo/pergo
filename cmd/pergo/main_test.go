@@ -12,8 +12,8 @@ import (
 	"github.com/pablojhp.pergo/internal/api/handler"
 	"github.com/pablojhp.pergo/internal/integration/chatwoot"
 	"github.com/pablojhp.pergo/internal/integration/typebot"
-	echosrv "github.com/pablojhp.pergo/internal/platform/echo"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
+	echosrv "github.com/pablojhp.pergo/internal/platform/echo"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/repository"
 )
@@ -32,7 +32,7 @@ func TestServerBootHealthz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -67,7 +67,7 @@ func TestServerBootReadyz(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -102,7 +102,7 @@ func TestServerBootReadyzDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /readyz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", resp.StatusCode)
@@ -130,7 +130,7 @@ func TestGracefulShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLDB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := postgres.RunMigrations(db); err != nil {
 		t.Fatalf("RunMigrations: %v", err)

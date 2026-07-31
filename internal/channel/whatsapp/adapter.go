@@ -124,7 +124,7 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 		if err != nil {
 			return "", fmt.Errorf("whatsapp media download from S3 failed: %w", err)
 		}
-		defer bodyRC.Close()
+		defer func() { _ = bodyRC.Close() }()
 
 		dataBytes, err := io.ReadAll(bodyRC)
 		if err != nil {
@@ -269,7 +269,8 @@ func buildInteractiveOrOverrideMsg(m *channel.MessagePayload) (*waE2E.Message, e
 		}
 		return &msg, nil
 	} else if m.Interactive != nil {
-		if m.Interactive.Type == "button" {
+		switch m.Interactive.Type {
+		case "button":
 			if len(m.Interactive.Action.Buttons) > 3 {
 				if m.FallbackBehavior == "fail" {
 					return nil, channel.NewTerminalError(fmt.Errorf("whatsapp: interactive message exceeds native limits (max 3 buttons) and fallback_behavior is fail"))
@@ -308,7 +309,7 @@ func buildInteractiveOrOverrideMsg(m *channel.MessagePayload) (*waE2E.Message, e
 				}
 			}
 			return &msg, nil
-		} else if m.Interactive.Type == "list" {
+		case "list":
 			if len(m.Interactive.Action.Sections) > 10 {
 				if m.FallbackBehavior == "fail" {
 					return nil, channel.NewTerminalError(fmt.Errorf("whatsapp: interactive list exceeds native limits and fallback_behavior is fail"))

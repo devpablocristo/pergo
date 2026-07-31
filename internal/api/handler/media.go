@@ -59,7 +59,7 @@ func (h *MediaHandler) Handle(c *echo.Context) error {
 		}
 		return c.String(http.StatusInternalServerError, "failed to download media")
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	if contentType != "" {
 		c.Response().Header().Set(echo.HeaderContentType, contentType)

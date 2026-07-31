@@ -16,6 +16,7 @@ import (
 	"github.com/pablojhp.pergo/internal/api/handler/admin"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/internal/ui/contextkey"
 	"github.com/pablojhp.pergo/templates/pages"
 )
 
@@ -58,8 +59,8 @@ func TestChatwootAdminHandler(t *testing.T) {
 		})
 
 		// Inject mock active workspace into request context to support sidebar template references
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.GetSettings(c)
@@ -98,8 +99,8 @@ func TestChatwootAdminHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.PostSettings(c)
@@ -151,8 +152,8 @@ func TestChatwootAdminHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.GetSettings(c)
@@ -191,8 +192,8 @@ func TestChatwootAdminHandler(t *testing.T) {
 			{Name: "workspace_id", Value: ws.ID.String()},
 		})
 
-		reqCtx := context.WithValue(req.Context(), "active_workspace", ws)
-		reqCtx = context.WithValue(reqCtx, "active_path", req.URL.Path)
+		reqCtx := context.WithValue(req.Context(), contextkey.ActiveWorkspace, ws)
+		reqCtx = context.WithValue(reqCtx, contextkey.ActivePath, req.URL.Path)
 		c.SetRequest(req.WithContext(reqCtx))
 
 		err := h.PostSettings(c)

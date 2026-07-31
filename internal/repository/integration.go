@@ -51,7 +51,7 @@ func (r *IntegrationRepository) Save(ctx context.Context, i *Integration) error 
 
 	var ciphertext []byte
 	var keyID string
-	var keyVersion int = 1
+	var keyVersion = 1
 
 	if len(i.Config) > 0 {
 		var err error

@@ -246,13 +246,14 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 	var connID uuid.UUID
 	var wabaCfg pages.WABAConfig
 
-	if channel == "whatsapp_mock" {
+	switch channel {
+	case "whatsapp_mock":
 		if !h.WhatsAppMockEnabled {
 			return c.String(http.StatusForbidden, "WhatsApp mock channel is disabled")
 		}
 		connID = uuid.New()
 		senderIdentity = "whatsapp-mock:" + connID.String()
-	} else if channel == "telegram" {
+	case "telegram":
 		token := c.FormValue("token")
 		if token == "" {
 			return c.String(http.StatusBadRequest, "token is required for Telegram bot")
@@ -285,7 +286,7 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 				})
 			}
 		}
-	} else if channel == "whatsapp_cloud" {
+	case "whatsapp_cloud":
 		phoneNumberID := c.FormValue("phone_number_id")
 		wabaAccountID := c.FormValue("waba_account_id")
 		token := c.FormValue("token")
@@ -309,7 +310,7 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 		if validationErr == nil {
 			credentialsJSON, _ = json.Marshal(wabaCfg)
 		}
-	} else {
+	default:
 		return c.String(http.StatusBadRequest, "unsupported channel type for synchronous creation")
 	}
 
@@ -485,7 +486,7 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 		slog.Error("websocket accept failed in device test", "error", err)
 		return err
 	}
-	defer ws.Close(websocket.StatusInternalError, "closed")
+	defer func() { _ = ws.Close(websocket.StatusInternalError, "closed") }()
 
 	ctx := c.Request().Context()
 
@@ -549,15 +550,16 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 				prettyJSON.Write(rawPayload)
 			}
 
-			if subject == "messages.outbound" {
+			switch subject {
+			case "messages.outbound":
 				eventType = "outbound"
 				badgeClass = "badge-secondary"
 				title = "Outbound Message Enqueued"
-			} else if subject == "webhooks.events" {
+			case "webhooks.events":
 				eventType = "webhook"
 				badgeClass = "badge-danger"
 				title = "Webhook Status Dispatched"
-			} else { // inbound.events.<workspace_id>
+			default: // inbound.events.<workspace_id>
 				eventType = "inbound"
 				badgeClass = "badge-success"
 				title = "Inbound Message Received"
@@ -595,10 +597,10 @@ func (h *DeviceHandler) registerTelegramWebhook(ctx context.Context, token, webh
 	if err != nil {
 		return fmt.Errorf("failed to connect to Telegram API for webhook registration: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Telegram webhook registration returned HTTP status %d", resp.StatusCode)
+		return fmt.Errorf("telegram webhook registration returned HTTP status %d", resp.StatusCode)
 	}
 
 	type tgWebhookResponse struct {
@@ -611,7 +613,7 @@ func (h *DeviceHandler) registerTelegramWebhook(ctx context.Context, token, webh
 	}
 
 	if !tgResp.Ok {
-		return fmt.Errorf("Telegram webhook registration failed: %s", tgResp.Description)
+		return fmt.Errorf("telegram webhook registration failed: %s", tgResp.Description)
 	}
 
 	slog.Info("Telegram webhook registered successfully", "url", webhookURL)
@@ -630,13 +632,13 @@ func (h *DeviceHandler) validateTelegramToken(ctx context.Context, token string)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to Telegram API: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return "", errors.New("Telegram token is unauthorized/invalid")
+		return "", errors.New("telegram token is unauthorized/invalid")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Telegram API returned HTTP status %d", resp.StatusCode)
+		return "", fmt.Errorf("telegram API returned HTTP status %d", resp.StatusCode)
 	}
 
 	type tgResponse struct {
@@ -652,7 +654,7 @@ func (h *DeviceHandler) validateTelegramToken(ctx context.Context, token string)
 	}
 
 	if !tgResp.Ok {
-		return "", errors.New("Telegram API returned OK=false")
+		return "", errors.New("telegram API returned OK=false")
 	}
 
 	slog.Info("Telegram bot token validated successfully", "username", tgResp.Result.Username)
@@ -678,7 +680,7 @@ func (h *DeviceHandler) syncTemplatesFromMeta(ctx context.Context, workspaceID u
 	if err != nil {
 		return fmt.Errorf("failed to connect to Meta API: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -695,9 +697,9 @@ func (h *DeviceHandler) syncTemplatesFromMeta(ctx context.Context, workspaceID u
 		}
 		var metaErr metaErrorResponse
 		if err := json.Unmarshal(respBytes, &metaErr); err == nil && metaErr.Error.Message != "" {
-			return fmt.Errorf("Meta API error: %s (code %d)", metaErr.Error.Message, metaErr.Error.Code)
+			return fmt.Errorf("meta API error: %s (code %d)", metaErr.Error.Message, metaErr.Error.Code)
 		}
-		return fmt.Errorf("Meta API returned HTTP status %d", resp.StatusCode)
+		return fmt.Errorf("meta API returned HTTP status %d", resp.StatusCode)
 	}
 
 	type metaTemplate struct {

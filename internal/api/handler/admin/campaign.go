@@ -104,7 +104,7 @@ func (h *CampaignHandler) UploadCSV(c *echo.Context) error {
 	if err != nil {
 		return c.String(http.StatusBadRequest, "failed to open uploaded file")
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, src); err != nil {

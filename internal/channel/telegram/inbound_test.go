@@ -13,13 +13,13 @@ import (
 )
 
 func TestTelegramInboundAdapter_Parse(t *testing.T) {
-	// Setup mock server to capture answerCallbackQuery
-	var lastCallbackAck string
+	// Setup mock server to capture answerCallbackQuery.
+	callbackAcks := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/botTEST_TOKEN/answerCallbackQuery" {
 			var body map[string]string
 			if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
-				lastCallbackAck = body["callback_query_id"]
+				callbackAcks <- body["callback_query_id"]
 			}
 		}
 		w.WriteHeader(http.StatusOK)
@@ -68,7 +68,6 @@ func TestTelegramInboundAdapter_Parse(t *testing.T) {
 	})
 
 	t.Run("Callback Query", func(t *testing.T) {
-		lastCallbackAck = "" // reset
 		payload := []byte(`{
 			"update_id": 2,
 			"callback_query": {
@@ -104,10 +103,13 @@ func TestTelegramInboundAdapter_Parse(t *testing.T) {
 			t.Errorf("expected ButtonReply.ID=btn_action_1, got %s", ev.Interactive.ButtonReply.ID)
 		}
 
-		// wait a tiny bit for the async ack to complete
-		time.Sleep(50 * time.Millisecond)
-		if lastCallbackAck != "cb_123" {
-			t.Errorf("expected answerCallbackQuery to be called with cb_123, got %s", lastCallbackAck)
+		select {
+		case callbackAck := <-callbackAcks:
+			if callbackAck != "cb_123" {
+				t.Errorf("expected answerCallbackQuery to be called with cb_123, got %s", callbackAck)
+			}
+		case <-time.After(time.Second):
+			t.Error("timed out waiting for answerCallbackQuery")
 		}
 	})
 }

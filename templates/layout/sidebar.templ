@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"github.com/pablojhp.pergo/internal/repository"
+	"github.com/pablojhp.pergo/templates/components"
 )
 
 func getActivePath(ctx context.Context) string {
@@ -158,6 +159,9 @@ templ Sidebar() {
 			</li>
 		</ul>
 		<div class="sidebar-footer p-3 border-t border-zinc-200">
+			<div class="mb-3">
+				@components.LanguageSelector()
+			</div>
 			<form method="POST" action="/admin/logout">
 				<button type="submit" class="nav-item logout-btn flex items-center gap-3 px-3 py-2 text-sm font-medium rounded-md text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-900 transition-all w-full">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>

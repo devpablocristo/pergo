@@ -5,6 +5,8 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/labstack/echo/v5"
+
+	"github.com/pablojhp.pergo/internal/i18n"
 )
 
 type htmxKey struct{}
@@ -36,5 +38,5 @@ func Render(c *echo.Context, statusCode int, t templ.Component) error {
 	if err := t.Render(c.Request().Context(), buf); err != nil {
 		return err
 	}
-	return c.HTML(statusCode, buf.String())
+	return c.HTML(statusCode, i18n.LocalizeHTML(c.Request().Context(), buf.String()))
 }

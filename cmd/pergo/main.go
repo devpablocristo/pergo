@@ -362,6 +362,7 @@ func main() {
 	})
 
 	// Middleware stack: RequestID → Trace → Recover → Auth (on protected routes)
+	e.Use(middleware.LocaleMiddleware())
 	e.Use(middleware.TraceMiddleware())
 
 	// Auth middleware — protects /api/* routes
@@ -410,6 +411,7 @@ func main() {
 	e.POST("/api/integrations/typebot", typebotWebhookHandler.Handle)
 
 	// --- Landing Page ---
+	e.POST("/locale", handler.LocalePost)
 	e.GET("/", func(c *echo.Context) error {
 		return middleware.Render(c, http.StatusOK, pages.Landing())
 	})
@@ -420,6 +422,7 @@ func main() {
 
 	// Public admin routes (no session auth required)
 	adminPublic := e.Group("/admin")
+	adminPublic.Use(middleware.HTMLLocalizer())
 	adminPublic.GET("/login", func(c *echo.Context) error {
 		return admin.LoginPage(c, false)
 	})
@@ -438,6 +441,7 @@ func main() {
 
 	// Protected admin routes (session auth required)
 	adminGroup := e.Group("/admin")
+	adminGroup.Use(middleware.HTMLLocalizer())
 	adminGroup.Use(middleware.HTMXMiddleware())
 	adminGroup.Use(middleware.SessionAuthMiddleware())
 	adminGroup.Use(middleware.DashboardAuditMiddleware(userActionLogRepo))

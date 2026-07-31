@@ -1,0 +1,16 @@
+package components
+
+import (
+	"github.com/pablojhp.pergo/internal/i18n"
+)
+
+templ LanguageSelector() {
+	<form method="POST" action="/locale" class="language-selector">
+		<label class="sr-only" for="pergo-locale">{ i18n.T(ctx, "Language") }</label>
+		<select id="pergo-locale" name="locale" aria-label={ i18n.T(ctx, "Language") } onchange="this.form.submit()" class="select select-bordered select-xs bg-white text-zinc-700 border-zinc-300">
+			<option value="es" selected?={ i18n.LocaleFromContext(ctx) == i18n.Spanish }>ES</option>
+			<option value="en" selected?={ i18n.LocaleFromContext(ctx) == i18n.English }>EN</option>
+			<option value="pt-BR" selected?={ i18n.LocaleFromContext(ctx) == i18n.BrazilianPortuguese }>PT-BR</option>
+		</select>
+	</form>
+}

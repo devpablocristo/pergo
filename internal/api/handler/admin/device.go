@@ -617,7 +617,7 @@ func (h *DeviceHandler) registerTelegramWebhook(ctx context.Context, token, webh
 		return fmt.Errorf("telegram webhook registration failed: %s", tgResp.Description)
 	}
 
-	slog.Info("Telegram webhook registered successfully", "url", webhookURL)
+	slog.Info("Telegram webhook registered successfully")
 	return nil
 }
 
@@ -658,7 +658,7 @@ func (h *DeviceHandler) validateTelegramToken(ctx context.Context, token string)
 		return "", errors.New("telegram API returned OK=false")
 	}
 
-	slog.Info("Telegram bot token validated successfully", "username", tgResp.Result.Username)
+	slog.Info("Telegram bot token validated successfully")
 	username := tgResp.Result.Username
 	if !strings.HasPrefix(username, "@") {
 		username = "@" + username

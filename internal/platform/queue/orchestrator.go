@@ -267,7 +267,7 @@ func (o *DispatchOrchestrator) dispatchToChannel(ctx context.Context, channelNam
 	to := qMsg.To
 	if channelName == "telegram" && o.contactRepo != nil {
 		if resolvedChatID, err := o.contactRepo.ResolveTelegramChatID(ctx, qMsg.WorkspaceID, qMsg.To); err == nil && resolvedChatID != "" {
-			slog.Info("orchestrator: resolved telegram contact identifier", "original", qMsg.To, "resolved", resolvedChatID, "trace_id", qMsg.TraceID)
+			slog.Info("orchestrator: resolved telegram contact identifier", "trace_id", qMsg.TraceID)
 			to = resolvedChatID
 			qMsg.To = resolvedChatID // Normalize so that audit logs also use the resolved numeric ID
 		}

@@ -54,7 +54,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		slog.SetDefault(obs.NewJSONLogger(os.Stderr))
 		cfg := config.Load()
 		ctx := context.Background()
 
@@ -101,7 +101,7 @@ func main() {
 		return
 	}
 
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(obs.NewJSONLogger(os.Stdout))
 
 	// --- Config from env vars ---
 	cfg := config.Load()
@@ -133,11 +133,11 @@ func main() {
 	// --- NATS ---
 	nc, err := nats.Connect(cfg.NATSUrl)
 	if err != nil {
-		slog.Error("failed to connect to NATS", "error", err, "url", cfg.NATSUrl)
+		slog.Error("failed to connect to NATS", "error", err)
 		os.Exit(1)
 	}
 	defer nc.Close()
-	slog.Info("connected to NATS", "url", cfg.NATSUrl)
+	slog.Info("connected to NATS")
 
 	// --- JetStream ---
 	stream, err := queue.EnsureStream(ctx, nc)

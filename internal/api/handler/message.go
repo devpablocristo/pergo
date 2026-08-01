@@ -153,7 +153,6 @@ func (h *MessageHandler) Create(c *echo.Context) error {
 		"workspace_id", workspaceID.String(),
 		"message_id", msgID.String(),
 		"channel", req.Channel,
-		"to", req.To,
 	)
 
 	// Set X-Trace-Id response header

@@ -70,10 +70,7 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 	}
 
 	if wc == nil || wc.Client() == nil {
-		if m.SenderIdentity == "" {
-			return "", fmt.Errorf("whatsapp: client not connected")
-		}
-		return "", fmt.Errorf("whatsapp: client not connected for sender identity: %s", m.SenderIdentity)
+		return "", fmt.Errorf("whatsapp: client not connected")
 	}
 
 	// Staggered dispatch: random delay before send
@@ -87,12 +84,11 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 	// Convert phone number to JID
 	recipientJID, parseErr := types.ParseJID(phoneToJID(m.To))
 	if parseErr != nil {
-		return "", fmt.Errorf("whatsapp: invalid recipient %q: %w", m.To, parseErr)
+		return "", fmt.Errorf("whatsapp: invalid recipient: %w", parseErr)
 	}
 
 	a.log.Info("whatsapp: dispatching message",
 		"trace_id", m.TraceID,
-		"to", recipientJID.String(),
 		"stagger", stagger,
 	)
 
@@ -216,7 +212,6 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 		a.log.Error("whatsapp: send failed",
 			"error", err,
 			"trace_id", m.TraceID,
-			"to", recipientJID.String(),
 		)
 		if isTerminalWhatsAppError(err) {
 			return "", channel.NewTerminalError(fmt.Errorf("whatsapp terminal: %w", err))
@@ -226,7 +221,6 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 
 	a.log.Info("whatsapp: message sent",
 		"trace_id", m.TraceID,
-		"to", recipientJID.String(),
 	)
 
 	respJSON, _ := json.Marshal(map[string]any{

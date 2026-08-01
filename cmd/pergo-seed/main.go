@@ -17,6 +17,7 @@ import (
 
 	"github.com/pablojhp.pergo/internal/config"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
+	"github.com/pablojhp.pergo/internal/platform/obs"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -42,6 +43,7 @@ type inboundPayload struct {
 }
 
 func main() {
+	slog.SetDefault(obs.NewJSONLogger(os.Stdout))
 	cfg := config.Load()
 	ctx := context.Background()
 
@@ -107,7 +109,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("connection setup: %w", err)
 	}
-	slog.Info("connection ready", "id", conn.ID, "channel", conn.Channel, "sender", conn.SenderIdentity)
+	slog.Info("connection ready", "id", conn.ID, "channel", conn.Channel)
 
 	// 3. Seed sample conversations (two contacts) so the inbox has content.
 	if err := seedConversations(ctx, pool, sessRepo, ws.ID, conn); err != nil {
@@ -115,7 +117,7 @@ func run(ctx context.Context, cfg *config.Config) error {
 	}
 
 	fmt.Printf("\nSeeded workspace %q (%s)\n", ws.Name, ws.ID)
-	fmt.Printf("Seeded WABA connection %q (%s) sender_identity=%s\n", conn.Name, conn.ID, conn.SenderIdentity)
+	fmt.Printf("Seeded WABA connection %q (%s)\n", conn.Name, conn.ID)
 	fmt.Printf("Inbox URL: http://localhost:%s/admin/inbox\n", cfg.ServerPort)
 	fmt.Println("To trigger an inbound (toast test), POST a WABA webhook to:")
 	fmt.Printf("  POST http://localhost:%s/webhooks/waba/%s\n", cfg.ServerPort, ws.ID)
@@ -196,7 +198,7 @@ func seedConversations(ctx context.Context, pool *pgxpool.Pool, sessRepo *reposi
 		}
 		// Upsert recipient session so the window checker and unread tracking work.
 		_ = sessRepo.Upsert(ctx, wsID, ct.from, "whatsapp_cloud", recipientIdentity, now)
-		slog.Info("seeded inbound", "from", ct.from, "body", ct.body)
+		slog.Info("seeded inbound", "workspace_id", wsID, "trace_id", trace)
 	}
 	return nil
 }

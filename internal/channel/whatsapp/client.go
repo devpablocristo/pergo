@@ -88,7 +88,7 @@ func NewWhatsAppClient(cfg ClientConfig) (*WhatsAppClient, error) {
 
 	if cfg.ProxyURL != "" {
 		if err := ConfigureProxy(cli, cfg.ProxyURL); err != nil {
-			clientLog.Warn("whatsapp: failed to configure proxy", "url", cfg.ProxyURL, "error", err)
+			clientLog.Warn("whatsapp: failed to configure proxy")
 		}
 	}
 
@@ -140,7 +140,6 @@ func (wc *WhatsAppClient) setupEventHandlers() {
 		case *waEvents.LoggedOut:
 			wc.log.Warn("whatsapp: logged out",
 				"on_connect", v.OnConnect,
-				"jid", wc.jid.String(),
 			)
 		case *waEvents.ClientOutdated:
 			wc.log.Warn("whatsapp: client outdated, auto-updating WA version and reconnecting")
@@ -154,13 +153,9 @@ func (wc *WhatsAppClient) setupEventHandlers() {
 				}
 			}()
 		case *waEvents.Connected:
-			wc.log.Info("whatsapp: connected",
-				"jid", wc.jid.String(),
-			)
+			wc.log.Info("whatsapp: connected")
 		case *waEvents.Disconnected:
-			wc.log.Warn("whatsapp: disconnected",
-				"jid", wc.jid.String(),
-			)
+			wc.log.Warn("whatsapp: disconnected")
 		}
 	})
 }
@@ -171,7 +166,7 @@ func (wc *WhatsAppClient) Run(ctx context.Context) error {
 		return fmt.Errorf("whatsapp connect: %w", err)
 	}
 
-	wc.log.Info("whatsapp: client running", "jid", wc.jid.String())
+	wc.log.Info("whatsapp: client running")
 	wc.Wait(ctx)
 	return nil
 }

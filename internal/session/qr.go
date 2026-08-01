@@ -160,7 +160,6 @@ func (m *Manager) StartPairing(ctx context.Context, workspaceID uuid.UUID, phone
 						slog.Error("session manager: pairing success handler failed",
 							"error", err,
 							"workspace_id", workspaceID,
-							"phone", phone,
 						)
 						wc.Disconnect()
 						out <- QRPairingEvent{Type: QREventError, Message: fmt.Sprintf("pairing succeeded but setup failed: %v", err)}
@@ -252,9 +251,8 @@ func (m *Manager) onPairingSuccess(ctx context.Context, wc whatsapp.Client, work
 	}()
 
 	slog.Info("session manager: device paired",
-		"jid", jid.String(),
-		"phone", phone,
 		"workspace_id", workspaceID,
+		"device_id", dID,
 	)
 	return nil
 }

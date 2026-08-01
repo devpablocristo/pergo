@@ -5,9 +5,9 @@ milestone_name: Email Channels & Tracking Engine
 current_phase: 28
 status: Milestone v1.5 complete
 stopped_at: Phase 28, Plan 02 executed
-last_updated: "2026-07-31T09:10:39-03:00"
-last_activity: 2026-07-31
-last_activity_desc: "Completed quick task 260731-atf: opt-in local WhatsApp mock channel"
+last_updated: "2026-08-01T07:59:07-03:00"
+last_activity: 2026-08-01
+last_activity_desc: "Completed quick task 260801-a1t: durable message idempotency"
 progress:
   total_phases: 3
   completed_phases: 3
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-06-25)
 Phase: Milestone v1.4 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-07-31 — Completed quick task 260731-atf: opt-in local WhatsApp mock channel
+Last activity: 2026-08-01 — Completed quick task 260801-a1t: durable message idempotency
 
 ## Performance Metrics
 
@@ -104,6 +104,9 @@ Recent decisions affecting current work:
 - [Phase 21]: Authenticated webhook endpoint using AuthMiddleware query-parameter token validation — D-05
 - [Phase 21]: Checks local mapping cache before routing inbound messages to prevent external API searches — D-04
 - [Phase 21]: Filters incoming Chatwoot webhook payloads strictly to outgoing, public, user-initiated messages — D-06
+- [Quick 260801-a1t]: Message ingestion uses a workspace-scoped PostgreSQL
+  ledger and a 24-hour JetStream duplicate window; this is not a
+  provider-level exactly-once claim.
 
 ### Pending Todos
 
@@ -165,12 +168,13 @@ Items acknowledged and carried forward from previous milestone close:
 | 260716-v4e | 2026-07-17 | quando-um-usuario-tenta-enviar-uma-mensa | complete ✓ |
 | 260720-fs6 | 2026-07-20 | fix 25-01-PLAN.md frontmatter traceability gap | complete ✓ |
 | 260731-atf | 2026-07-31 | add-an-opt-in-local-whatsapp-mock-channel | complete ✓ |
+| 260801-a1t | 2026-08-01 | make-pergo-message-ingestion-durably-idempotent | complete ✓ |
 
 ## Session Continuity
 
-Last session: 2026-07-20T21:04:44-03:00
-Stopped at: Session resumed, proceeding to start a new milestone
-Resume file: .planning/phases/27-implement-instagram-stories-handling-and-quick-replies-mappi/27-01-SUMMARY.md
+Last session: 2026-08-01T07:59:07-03:00
+Stopped at: Quick task 260801-a1t verified and ready for review
+Resume file: .planning/quick/260801-a1t-make-pergo-message-ingestion-durably-ide/260801-a1t-SUMMARY.md
 
 ## Operator Next Steps
 

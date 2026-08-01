@@ -6,13 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 
 	"github.com/pablojhp.pergo/internal/api/middleware"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/outbound"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/repository"
 )
@@ -115,6 +118,197 @@ func TestCreateMessageValid(t *testing.T) {
 	traceHeader := rec.Header().Get("X-Trace-Id")
 	if traceHeader != traceID {
 		t.Errorf("X-Trace-Id = %q, want %q", traceHeader, traceID)
+	}
+}
+
+type memoryMessageIdempotencyStore struct {
+	mutex  sync.Mutex
+	record repository.MessageIdempotency
+}
+
+func (store *memoryMessageIdempotencyStore) Acquire(
+	_ context.Context,
+	workspaceID uuid.UUID,
+	idempotencyKey string,
+	payloadHash string,
+	traceID string,
+	leaseFor time.Duration,
+) (repository.MessageIdempotency, bool, error) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	if store.record.MessageID == uuid.Nil {
+		leaseToken := uuid.New()
+		expiresAt := time.Now().UTC().Add(leaseFor)
+		store.record = repository.MessageIdempotency{
+			WorkspaceID: workspaceID, IdempotencyKey: idempotencyKey,
+			PayloadHash: payloadHash, MessageID: uuid.New(),
+			TraceID: traceID, Status: "processing",
+			QueuedAt: time.Now().UTC(), LeaseToken: &leaseToken,
+			LeaseExpiresAt: &expiresAt,
+		}
+		return store.record, true, nil
+	}
+	if store.record.PayloadHash != payloadHash {
+		return repository.MessageIdempotency{}, false,
+			repository.ErrMessageIdempotencyConflict
+	}
+	return store.record, false, nil
+}
+
+func (store *memoryMessageIdempotencyStore) Get(
+	_ context.Context,
+	_ uuid.UUID,
+	_ string,
+) (repository.MessageIdempotency, error) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	return store.record, nil
+}
+
+func (store *memoryMessageIdempotencyStore) MarkAccepted(
+	_ context.Context,
+	record repository.MessageIdempotency,
+) (repository.MessageIdempotency, error) {
+	store.mutex.Lock()
+	defer store.mutex.Unlock()
+	record.Status = "accepted"
+	record.LeaseToken = nil
+	record.LeaseExpiresAt = nil
+	store.record = record
+	return record, nil
+}
+
+func (store *memoryMessageIdempotencyStore) Release(
+	_ context.Context,
+	_ repository.MessageIdempotency,
+) error {
+	return nil
+}
+
+type countingIngestor struct {
+	mutex    sync.Mutex
+	attempts int
+}
+
+func (ingestor *countingIngestor) Ingest(
+	_ context.Context,
+	_ uuid.UUID,
+	_ string,
+	_ *domain.CreateMessageRequest,
+) (*domain.QueueMessage, error) {
+	ingestor.mutex.Lock()
+	defer ingestor.mutex.Unlock()
+	ingestor.attempts++
+	return &domain.QueueMessage{QueuedAt: time.Now().UTC()}, nil
+}
+
+func (ingestor *countingIngestor) Attempts() int {
+	ingestor.mutex.Lock()
+	defer ingestor.mutex.Unlock()
+	return ingestor.attempts
+}
+
+var _ outbound.OutboundProcessor = (*countingIngestor)(nil)
+
+func TestCreateMessageDurableReplayAfterResponseLoss(t *testing.T) {
+	store := &memoryMessageIdempotencyStore{}
+	ingestor := &countingIngestor{}
+	body := `{"to":"+1234567890","channel":"whatsapp","body":"Hello"}`
+	workspaceID := uuid.New()
+	firstTraceID := uuid.NewString()
+
+	send := func(handler *MessageHandler, traceID string, requestBody string) *httptest.ResponseRecorder {
+		t.Helper()
+		e := echo.New()
+		handler.RegisterRoutes(e)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/v1/messages",
+			strings.NewReader(requestBody),
+		)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(
+			"Idempotency-Key",
+			"pymes:notification:response-lost",
+		)
+		request = request.WithContext(testContext(traceID, workspaceID))
+		response := httptest.NewRecorder()
+		e.ServeHTTP(response, request)
+		return response
+	}
+
+	first := send(
+		&MessageHandler{Ingestor: ingestor, Idempotency: store},
+		firstTraceID,
+		body,
+	)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first response = %d: %s", first.Code, first.Body.String())
+	}
+	var firstReceipt domain.CreateMessageResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &firstReceipt); err != nil {
+		t.Fatalf("decode first receipt: %v", err)
+	}
+
+	// The caller loses the first HTTP response and retries after the process was
+	// reconstructed with the same durable store.
+	replay := send(
+		&MessageHandler{Ingestor: ingestor, Idempotency: store},
+		uuid.NewString(),
+		body,
+	)
+	if replay.Code != http.StatusAccepted {
+		t.Fatalf("replay response = %d: %s", replay.Code, replay.Body.String())
+	}
+	var replayReceipt domain.CreateMessageResponse
+	if err := json.Unmarshal(replay.Body.Bytes(), &replayReceipt); err != nil {
+		t.Fatalf("decode replay receipt: %v", err)
+	}
+	if replayReceipt != firstReceipt {
+		t.Fatalf(
+			"replay receipt = %+v, want %+v",
+			replayReceipt,
+			firstReceipt,
+		)
+	}
+	if replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatal("replay response did not identify the durable replay")
+	}
+	if replay.Header().Get("X-Trace-Id") != firstTraceID {
+		t.Fatalf(
+			"replay trace = %q, want stored %q",
+			replay.Header().Get("X-Trace-Id"),
+			firstTraceID,
+		)
+	}
+	if ingestor.Attempts() != 1 {
+		t.Fatalf("ingestion attempts = %d, want 1", ingestor.Attempts())
+	}
+
+	conflict := send(
+		&MessageHandler{Ingestor: ingestor, Idempotency: store},
+		firstTraceID,
+		`{"to":"+1234567890","channel":"whatsapp","body":"Changed"}`,
+	)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf(
+			"mismatched replay response = %d, want 409: %s",
+			conflict.Code,
+			conflict.Body.String(),
+		)
+	}
+	var problem domain.ErrorResponse
+	if err := json.Unmarshal(conflict.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if problem.Code != "idempotency_key_reused" {
+		t.Fatalf("conflict code = %q", problem.Code)
+	}
+	if ingestor.Attempts() != 1 {
+		t.Fatalf(
+			"conflict triggered ingestion; attempts = %d",
+			ingestor.Attempts(),
+		)
 	}
 }
 

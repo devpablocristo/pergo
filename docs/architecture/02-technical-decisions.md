@@ -78,6 +78,13 @@ three dependencies that clearly earn their place: `pgx`, `nats.go`,
 - **Transactions** are short and targeted: the audit batch writer opens
   one `BEGIN` per batch; the device-store path uses whatsmeow's
   `sqlstore.Container`, which manages its own tx.
+- **Message ingestion idempotency** is a PostgreSQL ledger keyed by
+  `(workspace_id, idempotency_key)`. It stores the canonical payload hash,
+  stable receipt, original Trace-ID and a renewable processing lease. Accepted
+  replays never publish again; payload mismatch is a stable conflict. JetStream
+  retains the same message ID for a 24-hour duplicate window to cover the
+  publish/receipt crash window. This is an ingestion guarantee, not a claim of
+  provider-level exactly-once delivery.
 
 ## What we are *not* doing
 

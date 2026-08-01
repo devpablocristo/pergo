@@ -20,6 +20,11 @@ const (
 
 	// MaxQueueDepth is the per-stream message limit that triggers backpressure.
 	MaxQueueDepth = 1000
+
+	// MessageDuplicateWindow covers PerGo and upstream HTTP retry horizons,
+	// including the crash window after JetStream accepted a publish but before
+	// the durable HTTP receipt was marked accepted.
+	MessageDuplicateWindow = 24 * time.Hour
 )
 
 // EnsureStream creates or updates a WorkQueuePolicy stream named "MESSAGES".
@@ -32,13 +37,14 @@ func EnsureStream(ctx context.Context, nc *nats.Conn) (jetstream.Stream, error) 
 	}
 
 	stream, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      StreamName,
-		Subjects:  []string{StreamSubject},
-		Retention: jetstream.WorkQueuePolicy,
-		MaxMsgs:   MaxQueueDepth,
-		Discard:   jetstream.DiscardNew,
-		Storage:   jetstream.FileStorage,
-		MaxAge:    24 * time.Hour,
+		Name:       StreamName,
+		Subjects:   []string{StreamSubject},
+		Retention:  jetstream.WorkQueuePolicy,
+		MaxMsgs:    MaxQueueDepth,
+		Discard:    jetstream.DiscardNew,
+		Storage:    jetstream.FileStorage,
+		MaxAge:     24 * time.Hour,
+		Duplicates: MessageDuplicateWindow,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create stream %s: %w", StreamName, err)
@@ -118,7 +124,6 @@ func EnsureInboundStream(ctx context.Context, nc *nats.Conn) (jetstream.Stream, 
 	slog.Info("jetstream inbound stream ready", "stream", "INBOUND")
 	return stream, nil
 }
-
 
 // EnsureConsumer creates or gets a durable pull consumer on the given stream.
 // Safe to call multiple times — CreateConsumer is idempotent when the config matches.
@@ -269,4 +274,3 @@ func EnsureCampaignConsumer(ctx context.Context, stream jetstream.Stream, consum
 	slog.Info("jetstream campaigns consumer ready", "consumer", consumerName)
 	return cons, nil
 }
-

@@ -2,9 +2,15 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -30,6 +36,27 @@ type ConnectionFinder interface {
 	GetDefaultChannelConnection(ctx context.Context, workspaceID uuid.UUID, channel string) (*repository.Connection, error)
 }
 
+type MessageIdempotencyStore interface {
+	Acquire(
+		context.Context,
+		uuid.UUID,
+		string,
+		string,
+		string,
+		time.Duration,
+	) (repository.MessageIdempotency, bool, error)
+	Get(
+		context.Context,
+		uuid.UUID,
+		string,
+	) (repository.MessageIdempotency, error)
+	MarkAccepted(
+		context.Context,
+		repository.MessageIdempotency,
+	) (repository.MessageIdempotency, error)
+	Release(context.Context, repository.MessageIdempotency) error
+}
+
 // MessageHandler holds dependencies for the POST /messages endpoint.
 type MessageHandler struct {
 	Ingestor       outbound.OutboundProcessor
@@ -37,6 +64,7 @@ type MessageHandler struct {
 	QueueDepth     *middleware.QueueDepthTracker
 	S3Client       *storage.S3Client
 	ConnectionRepo ConnectionFinder
+	Idempotency    MessageIdempotencyStore
 }
 
 // RegisterRoutes wires the message endpoints onto the Echo router.
@@ -67,6 +95,77 @@ func (h *MessageHandler) Create(c *echo.Context) error {
 		})
 	}
 
+	idempotencyKey := c.Request().Header.Get("Idempotency-Key")
+	var idempotency repository.MessageIdempotency
+	acquired := false
+	var err error
+	if idempotencyKey != "" {
+		if !validMessageIdempotencyKey(idempotencyKey) {
+			return c.JSON(http.StatusBadRequest, domain.ErrorResponse{
+				Code:    "invalid_idempotency_key",
+				Message: "Idempotency-Key is invalid",
+			})
+		}
+		if validationError := domain.ValidateMessage(&req); validationError != nil {
+			return c.JSON(http.StatusBadRequest, *validationError)
+		}
+		if h.Idempotency == nil {
+			return c.JSON(http.StatusServiceUnavailable, domain.ErrorResponse{
+				Code:    "idempotency_unavailable",
+				Message: "durable message ingestion is unavailable",
+			})
+		}
+		payloadHash, hashErr := messagePayloadHash(req)
+		if hashErr != nil {
+			return c.JSON(http.StatusBadRequest, domain.ErrorResponse{
+				Code:    "invalid_payload",
+				Message: "request body validation failed",
+			})
+		}
+		idempotency, acquired, err = h.Idempotency.Acquire(
+			c.Request().Context(),
+			workspaceID,
+			idempotencyKey,
+			payloadHash,
+			traceID,
+			30*time.Second,
+		)
+		if errors.Is(err, repository.ErrMessageIdempotencyConflict) {
+			return c.JSON(http.StatusConflict, domain.ErrorResponse{
+				Code:    "idempotency_key_reused",
+				Message: "Idempotency-Key was already used with another payload",
+			})
+		}
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, domain.ErrorResponse{
+				Code:    "idempotency_unavailable",
+				Message: "durable message ingestion is unavailable",
+			})
+		}
+		traceID = idempotency.TraceID
+		if idempotency.Accepted() {
+			return h.accepted(c, workspaceID, req.Channel, idempotency, true)
+		}
+		if !acquired {
+			replayed, waitErr := h.waitForAccepted(
+				c.Request().Context(),
+				workspaceID,
+				idempotencyKey,
+				500*time.Millisecond,
+			)
+			if waitErr == nil && replayed.Accepted() {
+				return h.accepted(
+					c, workspaceID, req.Channel, replayed, true,
+				)
+			}
+			c.Response().Header().Set("Retry-After", "1")
+			return c.JSON(http.StatusTooEarly, domain.ErrorResponse{
+				Code:    "idempotency_in_progress",
+				Message: "an identical request is still being accepted",
+			})
+		}
+	}
+
 	// Dynamically wrap legacy fields if Ingestor is not injected
 	ingestor := h.Ingestor
 	if ingestor == nil {
@@ -84,6 +183,18 @@ func (h *MessageHandler) Create(c *echo.Context) error {
 	// Ingest using OutboundProcessor
 	qMsg, err := ingestor.Ingest(c.Request().Context(), workspaceID, traceID, &req)
 	if err != nil {
+		if acquired {
+			if releaseErr := h.Idempotency.Release(
+				c.Request().Context(), idempotency,
+			); releaseErr != nil {
+				slog.Error(
+					"failed to release message idempotency lease",
+					"error", releaseErr,
+					"trace_id", traceID,
+					"workspace_id", workspaceID.String(),
+				)
+			}
+		}
 		if errors.Is(err, outbound.ErrQueueFull) {
 			c.Response().Header().Set("Retry-After", "5")
 			return c.JSON(http.StatusTooManyRequests, domain.ErrorResponse{
@@ -145,23 +256,97 @@ func (h *MessageHandler) Create(c *echo.Context) error {
 		})
 	}
 
-	msgID := uuid.New()
-
-	// Log the ingestion event
-	slog.Info("message ingested",
-		"trace_id", traceID,
-		"workspace_id", workspaceID.String(),
-		"message_id", msgID.String(),
-		"channel", req.Channel,
+	if acquired {
+		idempotency, err = h.Idempotency.MarkAccepted(
+			c.Request().Context(), idempotency,
+		)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, domain.ErrorResponse{
+				Code:    "idempotency_unavailable",
+				Message: "message acceptance could not be recorded",
+			})
+		}
+		return h.accepted(c, workspaceID, req.Channel, idempotency, false)
+	}
+	return h.accepted(
+		c,
+		workspaceID,
+		req.Channel,
+		repository.MessageIdempotency{
+			MessageID: uuid.New(), TraceID: traceID, QueuedAt: qMsg.QueuedAt,
+		},
+		false,
 	)
+}
 
-	// Set X-Trace-Id response header
-	c.Response().Header().Set("X-Trace-Id", traceID)
+var messageIdempotencyKeyPattern = regexp.MustCompile(
+	`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$`,
+)
 
-	// Return 202 Accepted
+func validMessageIdempotencyKey(value string) bool {
+	return value == strings.TrimSpace(value) &&
+		messageIdempotencyKeyPattern.MatchString(value)
+}
+
+func messagePayloadHash(request domain.CreateMessageRequest) (string, error) {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (h *MessageHandler) waitForAccepted(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	idempotencyKey string,
+	maxWait time.Duration,
+) (repository.MessageIdempotency, error) {
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		record, err := h.Idempotency.Get(ctx, workspaceID, idempotencyKey)
+		if err != nil {
+			return repository.MessageIdempotency{}, err
+		}
+		if record.Accepted() {
+			return record, nil
+		}
+		select {
+		case <-ctx.Done():
+			return repository.MessageIdempotency{}, ctx.Err()
+		case <-timer.C:
+			return record, context.DeadlineExceeded
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *MessageHandler) accepted(
+	c *echo.Context,
+	workspaceID uuid.UUID,
+	channel string,
+	record repository.MessageIdempotency,
+	replayed bool,
+) error {
+	slog.Info(
+		"message ingested",
+		"trace_id", record.TraceID,
+		"workspace_id", workspaceID.String(),
+		"message_id", record.MessageID.String(),
+		"channel", channel,
+		"replayed", replayed,
+	)
+	c.Response().Header().Set("X-Trace-Id", record.TraceID)
+	if replayed {
+		c.Response().Header().Set("Idempotency-Replayed", "true")
+	}
 	return c.JSON(http.StatusAccepted, domain.CreateMessageResponse{
-		MessageID: msgID,
+		MessageID: record.MessageID,
 		Status:    domain.StatusQueued,
-		QueuedAt:  qMsg.QueuedAt,
+		QueuedAt:  record.QueuedAt,
 	})
 }

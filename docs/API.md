@@ -22,11 +22,36 @@ Envia uma mensagem (texto, mídia ou template) para um canal específico (Telegr
 
 * **Endpoint:** `POST /api/v1/messages`
 * **Content-Type:** `application/json`
+* **Idempotency-Key:** chave opaca de 1 a 255 caracteres, iniciada por letra ou
+  número e restrita a letras, números, `.`, `_`, `:`, `/` e `-`. É opcional
+  para clientes legados e obrigatória para integrações que precisam de
+  recuperação segura após timeout.
 * **Respostas:**
   * `202 Accepted` — Mensagem recebida com sucesso e enfileirada para envio durável.
   * `400 Bad Request` — Payload inválido ou malformado.
   * `401 Unauthorized` — Chave de API inválida ou ausente.
+  * `409 Conflict` — A mesma `Idempotency-Key` já foi usada neste Workspace
+    com outro payload (`idempotency_key_reused`).
+  * `425 Too Early` — Uma requisição concorrente com a mesma chave ainda está
+    sendo aceita; repetir após o valor de `Retry-After`.
   * `429 Too Many Requests` — A fila de mensagens do seu Workspace atingiu o limite de capacidade de retenção de backpressure (padrão: 1.000 mensagens pendentes).
+
+### Idempotência durável
+
+PerGo associa a chave ao Workspace autenticado, ao hash canônico do payload, ao
+`X-Trace-ID` original e a um receipt estável. Depois de um `202`, uma repetição
+idêntica devolve o mesmo `message_id`, `queued_at` e `X-Trace-ID`, com
+`Idempotency-Replayed: true`, sem publicar novamente. A garantia sobrevive a
+reinícios porque o ledger fica em PostgreSQL.
+
+Se o processo cair na pequena janela entre o aceite do JetStream e a gravação
+do receipt, a lease expira e a requisição pode ser retomada. O publish conserva
+o mesmo `X-Trace-ID`, e o stream mantém uma janela de deduplicação de 24 horas.
+Isso evita duplicação na ingestão e no retry HTTP; não transforma APIs externas
+de WhatsApp em exactly-once diante de uma queda depois que o provedor enviou.
+O ledger é conservado durante toda a vida do Workspace e removido por cascade
+somente quando o Workspace é excluído; não há expiração silenciosa que permita
+reutilizar uma chave antiga.
 
 ### Payload Padrão (Mensagem de Texto)
 

@@ -37,3 +37,25 @@ func TestIsTerminalNil(t *testing.T) {
 		t.Error("nil error should not be terminal")
 	}
 }
+
+func TestUncertainError(t *testing.T) {
+	inner := errors.New("provider response lost at https://example.invalid/bot-secret/send")
+	uncertain := NewUncertainError(inner)
+
+	if !IsUncertain(uncertain) {
+		t.Fatal("expected IsUncertain to return true")
+	}
+	if IsTerminal(uncertain) {
+		t.Fatal("uncertain error must not be terminal/fallback-safe")
+	}
+	if uncertain.Error() != "uncertain: provider delivery outcome unknown" {
+		t.Fatalf("unexpected error message: %s", uncertain.Error())
+	}
+	if errors.Is(uncertain, inner) == false {
+		t.Fatal("uncertain error must retain its cause for programmatic inspection")
+	}
+	var target *UncertainError
+	if !errors.As(uncertain, &target) {
+		t.Fatal("errors.As should unwrap to UncertainError")
+	}
+}

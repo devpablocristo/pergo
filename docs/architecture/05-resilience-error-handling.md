@@ -74,9 +74,18 @@ Every child derives from the request `ctx` so cancellation cascades.
 - **Provider-level** retries are **not** layered on top of JetStream
   retries by default — that doubles the delivery attempt count and
   risks sending a message to a human twice. The contract is:
-  - `Dispatch` returns `nil` only when the provider accepted the
-    message. A transient HTTP 5xx from WABA returns an error → JetStream
+  - `Dispatch` returns `nil` only when the provider returned an
+    authoritative acceptance. An explicit retryable response such as a
+    rate limit or provider HTTP 5xx returns an error → JetStream
     redelivers.
+  - A transport failure after the request may have left the process is
+    an **uncertain** outcome. The adapter returns `UncertainError`; the
+    orchestrator persists internal state `uncertain`, ACKs the broker,
+    blocks fallback and exposes only the stable public event
+    `failed` with `error=DELIVERY_UNCERTAIN`. It never persists or logs
+    the raw transport error because it can contain tokens or PII.
+  - An expired durable provider claim in state `sending` follows the
+    same uncertain path. It is never automatically reacquired.
   - `Dispatch` returns a **terminal error** (e.g. `ErrTemplateWindowExpired`)
     → the routing engine catches it and advances to the next fallback
     channel *without* `nak`-ing. Terminal errors are typed so the worker
@@ -85,6 +94,10 @@ Every child derives from the request `ctx` so cancellation cascades.
     var term ErrTerminal
     if errors.As(err, &term) { /* advance fallback, ack original */ }
     ```
+- Raw provider errors are never written to the dispatch row, audit payload,
+  public webhook or structured log. Those boundaries use stable codes:
+  `DELIVERY_TRANSIENT`, `DELIVERY_TERMINAL`, `DELIVERY_FAILED`,
+  `DELIVERY_EXPIRED` and `DELIVERY_UNCERTAIN`.
 - **Webhook delivery** has its own JetStream stream with `MaxDeliver:
   10` and exponential `AckWait` (1s, 5s, 30s, 2m, 10m…). A consumer
   that 4xx's permanently is NAK'd until `MaxDeliver`, then moved to a

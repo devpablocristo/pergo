@@ -496,7 +496,7 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", channel.NewUncertainError(fmt.Errorf("meta transport response lost: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

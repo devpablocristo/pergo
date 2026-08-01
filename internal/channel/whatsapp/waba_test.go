@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,12 @@ import (
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/repository"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func getTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -324,6 +331,25 @@ func TestWABADispatch(t *testing.T) {
 		}
 		if channel.IsTerminal(err) {
 			t.Errorf("expected error to be transient, got terminal: %v", err)
+		}
+	})
+
+	t.Run("Lost Transport Response Is Uncertain", func(t *testing.T) {
+		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			_, _ = io.ReadAll(req.Body)
+			return nil, errors.New("connection reset after request write")
+		})}
+		adapter := NewWABAAdapter(connectionsRepo, client, nil, "")
+		adapter.SetBaseURL("https://meta.invalid")
+
+		_, err := adapter.Dispatch(tenantCtx, &channel.MessagePayload{
+			ConnectionID:   connID,
+			SenderIdentity: "+12345_phone_id",
+			To:             "+12345",
+			Body:           "hi",
+		})
+		if !channel.IsUncertain(err) {
+			t.Fatalf("transport error=%v, want uncertain", err)
 		}
 	})
 

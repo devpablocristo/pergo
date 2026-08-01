@@ -60,27 +60,29 @@ graph TD
 
 ### 1. Ingestion (`POST /api/v1/messages`)
 1. **Request Ingress**: The API client hits `POST /api/v1/messages` (handled by [MessageHandler.Create](file:///home/pablo/Coding/PerGo/internal/api/handler/message.go#L50)).
-2. **Context Enrichment**: The server injects a correlation Trace ID via `TraceMiddleware` and retrieves the workspace context from the `AuthMiddleware` (which validates the client's API key).
-3. **Rate Limiting & Backpressure**: 
+2. **Context Enrichment**: The server requires the caller's stable `X-Trace-ID`, reads `Idempotency-Key`, and retrieves the workspace context from the `AuthMiddleware` (which validates the client's API key).
+3. **Durable Ingress Claim**: A short PostgreSQL transaction creates or locks the workspace-scoped ingress ledger row. It binds the exact request hash to the trace, allocates the deterministic receipt, and returns `202` immediately for an already queued replay. A live concurrent claim returns `425`; a changed payload or trace returns `409`.
+4. **Rate Limiting & Backpressure**:
    - `RateLimiterMiddleware` checks workspace-level velocity limits.
    - `QueueDepthTracker` validates that the workspace's queued outbound message count has not exceeded 1,000. If exceeded, the request is immediately rejected with HTTP `429 Too Many Requests`.
-4. **Media Handling**: If the payload contains media, the server downloads the media stream, validates its size (< 25MB), uploads it to the configured S3-compatible bucket, and updates the payload's `media_url` to an internal proxy endpoint (`/media/{workspace_id}/{hash}.{ext}`). <!-- VERIFY: PerGo relies on external S3-compatible storage (e.g. AWS S3 or MinIO) for media retention. -->
-5. **Route Resolution**: The routing resolver ([ConnectionRepository](file:///home/pablo/Coding/PerGo/internal/repository/connection.go#L40)) checks the sender identity database config to map the request to a specific `ConnectionID` and verify channel compatibility.
-6. **JetStream Enqueue**: The message payload is wrapped in a `QueueMessage` struct and published to NATS JetStream under the subject `messages.outbound` with the header `Nats-Msg-Id` set to the trace ID (ensuring broker-level deduplication).
-7. **Ingress Response**: The server returns an HTTP `202 Accepted` status containing the generated message ID and `queued` status.
+5. **Media Handling**: If the payload contains media, the server downloads the media stream, validates its size (< 25MB), uploads it to the configured S3-compatible bucket, and updates the payload's `media_url` to an internal proxy endpoint (`/media/{workspace_id}/{hash}.{ext}`). <!-- VERIFY: PerGo relies on external S3-compatible storage (e.g. AWS S3 or MinIO) for media retention. -->
+6. **Route Resolution**: The routing resolver checks the sender identity database config to map the request to a specific `ConnectionID` and verify channel compatibility.
+7. **JetStream Enqueue**: The message payload contains the stable receipt and is published to `messages.outbound`; `Nats-Msg-Id` is the stable trace. No database transaction remains open during this network call.
+8. **Fenced Completion**: A compare-and-swap using `claim_token` and `claim_generation` marks the ledger row queued. If the response is lost, an expired lease can republish with the same trace. JetStream suppresses duplicates inside a 24-hour window, while the worker's PostgreSQL provider claim remains authoritative after that window.
+9. **Ingress Response**: The server returns `202 Accepted` containing the persisted receipt as `message_id`, `queued`, and the stable `queued_at`.
 
 ### 2. Queue & De-queue
 - The NATS JetStream durability boundary decouples HTTP request acceptance from downstream execution. <!-- VERIFY: NATS server is configured with JetStream enabled to support the outbound message stream. -->
 - The background [Worker](file:///home/pablo/Coding/PerGo/internal/platform/queue/worker.go#L18) pulls messages from the JetStream stream.
 
 ### 3. Outbound Execution, Fallback, & Webhooks
-1. **Idempotency Check**: The worker queries the database via [MessageDispatchRepository](file:///home/pablo/Coding/PerGo/internal/repository/dispatch.go) to see if the trace ID has already been dispatched. If `sent`, the message is acknowledged (`Ack`) and discarded.
+1. **Durable Delivery Claim**: The worker queries [MessageDispatchRepository](file:///home/pablo/Coding/PerGo/internal/repository/dispatch.go), acknowledges terminal traces, then acquires a token/generation lease before any provider call. A competing replica NAKs behind the live owner. An expired `sending` claim becomes internal state `uncertain` rather than being sent a second time.
 2. **TTL Verification**: The worker verifies if the message's custom TTL has expired relative to its ingestion time. If expired, it flags the dispatch as `failed`, pushes a webhook event, and acks the queue.
 3. **Execution Loop**: The worker resolves the channel adapter via [channel.Registry](file:///home/pablo/Coding/PerGo/internal/channel/registry.go#L7). It iterates through the primary channel and any fallback channels:
-   - **On Success**: The worker updates the database state to `sent`, notifies the `webhooks.events` channel, saves audit logs via the asynchronous audit recorder, and signals `Ack` to JetStream.
-     - *WABA Provider ID Tracking*: If the successfully dispatched channel is `whatsapp_cloud`, the worker extracts the unique Meta message ID (`wamid`) from the HTTP response payload and associates it with the database record in `message_dispatches.provider_message_id` via [MessageDispatchRepository.UpdateProviderMessageID](file:///home/pablo/Coding/PerGo/internal/repository/dispatch.go#L123).
-   - **On Transient Failure** (e.g., rate-limit, network timeout): The worker updates the DB state to `failed_transient` and sends a negative acknowledgment (`NakWithDelay`) to NATS to trigger exponential backoff redelivery.
+   - **On Success**: The worker atomically stores `sent`, the provider ID when present, and releases the fenced claim; it then notifies `webhooks.events`, saves audit logs and signals `Ack` to JetStream.
+   - **On Explicit Retryable Response** (e.g., rate limit or provider 5xx response): The worker updates internal DB state to `failed_transient` and sends a negative acknowledgment (`NakWithDelay`) to NATS to trigger exponential backoff redelivery.
    - **On Terminal Failure** (e.g., number not on WhatsApp, credentials invalid): The worker updates the state, logs the error, and falls back to the next channel in the payload's `fallback_channels` slice. If all fallbacks are exhausted, the status is set to `failed` and the message is acked.
+   - **On Uncertain Transport Outcome**: The worker persists internal state `uncertain`, blocks retry and fallback, ACKs JetStream and publishes public event `failed` with `error=DELIVERY_UNCERTAIN`. `sending`, `failed_transient` and `uncertain` are never public event names.
 4. **Webhook Dispatch**: The [WebhookWorker](file:///home/pablo/Coding/PerGo/internal/platform/queue/webhook_worker.go) reads webhook events from NATS and POSTs status updates back to tenant endpoints, routing failures to a Webhook DLQ in Postgres if delivery fails.
 
 ### 4. WABA Read Receipts & Status Webhooks
@@ -90,7 +92,8 @@ graph TD
    - It bypasses contact resolution, recipient session tracking, and audit logging to avoid duplicate thread/contact creation.
    - It queries the database via `GetByProviderMessageID` to match the incoming `wamid` to the original `message_dispatches` record.
    - If found, it updates the dispatch status in the database using `UpdateDispatchStatus`.
-   - It publishes a status update event (`MessageStatusUpdatedPayload`) to the NATS JetStream subject `messages.status_updated` for real-time notification downstream.
+   - It retains the internal `messages.status_updated` event with the provider ID.
+   - For `sent`, `delivered`, `read`, and `failed`, it also publishes the canonical `webhooks.events` contract. Its `message_id` is the original ingress receipt, never the provider ID or dispatch row ID.
 
 ---
 
@@ -109,7 +112,7 @@ PerGo enforces clear interfaces to isolate business rules from transport protoco
 * **[session.ActiveSession](file:///home/pablo/Coding/PerGo/internal/session/registry.go#L23)**: An in-memory mapping of active WhatsApp JIDs to stateful multi-device WebSocket connections (`whatsmeow`).
 * **[session.Manager](file:///home/pablo/Coding/PerGo/internal/session/manager.go#L34)**: Co-ordinates WhatsApp Web device lifetimes. Handles concurrent reconnection throttling (limiting startup stampedes), listens to incoming message events, downloads media, and publishes incoming events to NATS.
 * **[repository.ConnectionRepository](file:///home/pablo/Coding/PerGo/internal/repository/connection.go#L40)**: Manages persistence of workspace credentials. Handles transparent AES-256-GCM envelope encryption/decryption of channel credentials using a Key Encryption Key (KEK).
-* **[repository.MessageDispatchRepository](file:///home/pablo/Coding/PerGo/internal/repository/dispatch.go#L35)**: Manages outbound message lifecycle states inside the `message_dispatches` table. Features queries to map external provider message IDs (e.g., WhatsApp `wamid`) to internal dispatches (`UpdateProviderMessageID`, `GetByProviderMessageID`) and update dispatch statuses (`UpdateDispatchStatus`).
+* **[repository.MessageDispatchRepository](file:///home/pablo/Coding/PerGo/internal/repository/dispatch.go)**: Manages outbound lifecycle, workspace-scoped provider IDs and the durable provider claim (`ClaimDelivery`, `RenewDeliveryClaim`, `UpdateClaimedDelivery`) inside `message_dispatches`.
 * **[inbound.InboundProcessor](file:///home/pablo/Coding/PerGo/internal/inbound/processor.go#L93)**: Coordinates processing of incoming message events, media uploads, and database session states. It delegates the routing of synced inbound messages to the `InboundRouter` seam.
 * **[inbound.InboundRouter](file:///home/pablo/Coding/PerGo/internal/inbound/router.go)**: Clean interface seam mapping incoming events asynchronously to configured external sync systems (such as Chatwoot or Typebot) in background goroutines.
 * **[repository.AuditRepository](file:///home/pablo/Coding/PerGo/internal/repository/audit.go#L36)**: Handles loading of historical logs and unified threads. Its `ListThreadByContact` method runs queries joining the `audit_logs` table with `message_dispatches` to return the status indicator of outbound messages.

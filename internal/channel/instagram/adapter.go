@@ -219,7 +219,7 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", channel.NewUncertainError(fmt.Errorf("instagram transport response lost: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

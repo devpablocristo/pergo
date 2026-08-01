@@ -177,7 +177,7 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 	}
 
 	// Verify DB contains delivered
-	dDelivered, err := dispatchRepo.GetByProviderMessageID(ctx, providerID)
+	dDelivered, err := dispatchRepo.GetByProviderMessageID(ctx, ws.ID, providerID)
 	if err != nil {
 		t.Fatalf("failed to retrieve dispatch: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 	}
 
 	// Verify DB contains read
-	dRead, err := dispatchRepo.GetByProviderMessageID(ctx, providerID)
+	dRead, err := dispatchRepo.GetByProviderMessageID(ctx, ws.ID, providerID)
 	if err != nil {
 		t.Fatalf("failed to retrieve dispatch: %v", err)
 	}

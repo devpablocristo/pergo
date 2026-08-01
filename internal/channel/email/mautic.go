@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/pablojhp.pergo/internal/channel"
 )
 
 // MauticConfig holds configuration for Mautic REST API integration.
@@ -77,7 +78,7 @@ func (m *MauticProvider) Send(ctx context.Context, msg *EmailMessage) (string, e
 
 	resp, err := m.config.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("mautic HTTP request failed: %w", err)
+		return "", channel.NewUncertainError(fmt.Errorf("mautic transport response lost: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

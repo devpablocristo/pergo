@@ -65,6 +65,29 @@ func (p *Processor) Ingest(
 	traceID string,
 	req *domain.CreateMessageRequest,
 ) (*domain.QueueMessage, error) {
+	return p.ingest(ctx, workspaceID, traceID, uuid.Nil, req)
+}
+
+// IngestWithReceipt runs the same pipeline while binding a durable receipt to
+// the queued message. The HTTP adapter uses this path after acquiring its
+// PostgreSQL ingress claim.
+func (p *Processor) IngestWithReceipt(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	traceID string,
+	receiptID uuid.UUID,
+	req *domain.CreateMessageRequest,
+) (*domain.QueueMessage, error) {
+	return p.ingest(ctx, workspaceID, traceID, receiptID, req)
+}
+
+func (p *Processor) ingest(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	traceID string,
+	receiptID uuid.UUID,
+	req *domain.CreateMessageRequest,
+) (*domain.QueueMessage, error) {
 	// 1. Backpressure: check queue depth tracker limits
 	if p.tracker != nil && workspaceID != uuid.Nil {
 		if p.tracker.Exceeds(workspaceID, 1000) {
@@ -147,6 +170,7 @@ func (p *Processor) Ingest(
 
 	// 5. Construct and Publish QueueMessage
 	qMsg := &domain.QueueMessage{
+		MessageID:        receiptID,
 		WorkspaceID:      workspaceID,
 		ConnectionID:     conn.ID,
 		SenderIdentity:   conn.SenderIdentity,
@@ -157,7 +181,7 @@ func (p *Processor) Ingest(
 		Media:            req.Media,
 		Metadata:         req.Metadata,
 		TTLSeconds:       req.TTLSeconds,
-		QueuedAt:         time.Now().UTC(),
+		QueuedAt:         time.Now().UTC().Truncate(time.Microsecond),
 		FallbackChannels: req.FallbackChannels,
 		TemplateName:     req.TemplateName,
 		Language:         req.Language,

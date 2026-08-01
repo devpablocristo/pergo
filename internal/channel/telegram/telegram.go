@@ -258,7 +258,7 @@ func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 func (a *TelegramAdapter) executeRequest(req *http.Request) (string, error) {
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", channel.NewUncertainError(fmt.Errorf("telegram transport response lost: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

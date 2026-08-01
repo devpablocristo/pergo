@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/pablojhp.pergo/internal/channel"
 )
 
 // SESConfig holds configuration for Amazon SES HTTP/API integration.
@@ -107,7 +108,7 @@ func (s *SESProvider) Send(ctx context.Context, msg *EmailMessage) (string, erro
 
 	resp, err := s.config.HTTPClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("SES HTTP request failed: %w", err)
+		return "", channel.NewUncertainError(fmt.Errorf("SES transport response lost: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

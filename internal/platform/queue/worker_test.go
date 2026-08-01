@@ -1,18 +1,23 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"os"
 
 	"github.com/pablojhp.pergo/internal/channel"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/platform/audit"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/repository"
 )
@@ -135,30 +140,6 @@ func TestIsExpired(t *testing.T) {
 	}
 }
 
-func TestDeliveryDedup(t *testing.T) {
-	orchestrator := &DispatchOrchestrator{}
-
-	traceID := "test-trace-dedup-001"
-
-	// First call — not in dispatched set
-	_, loaded := orchestrator.dispatched.LoadOrStore(traceID, struct{}{})
-	if loaded {
-		t.Error("first call should NOT be loaded (first occurrence)")
-	}
-
-	// Second call — should be in dispatched set
-	_, loaded = orchestrator.dispatched.LoadOrStore(traceID, struct{}{})
-	if !loaded {
-		t.Error("second call SHOULD be loaded (duplicate detected)")
-	}
-
-	// Different trace ID — not a duplicate
-	_, loaded = orchestrator.dispatched.LoadOrStore("test-trace-dedup-002", struct{}{})
-	if loaded {
-		t.Error("different trace ID should NOT be loaded")
-	}
-}
-
 // --- Fake adapters for orchestrator tests ---
 
 // fakeDispatchMsg implements DispatchMessage for tests.
@@ -180,16 +161,32 @@ func (m *fakeDispatchMsg) NakWithDelay(d time.Duration) error {
 }
 
 type fakeDispatcher struct {
-	err         error
-	calledCount int
-	calledWith  []string
-	lastTo      string
+	err           error
+	calledCount   int
+	calledWith    []string
+	lastTo        string
+	lastMessageID string
+}
+
+type blockingConcurrentDispatcher struct {
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingConcurrentDispatcher) Dispatch(_ context.Context, _ *channel.MessagePayload) (string, error) {
+	d.calls.Add(1)
+	d.once.Do(func() { close(d.entered) })
+	<-d.release
+	return "provider-once", nil
 }
 
 func (m *fakeDispatcher) Dispatch(ctx context.Context, p *channel.MessagePayload) (string, error) {
 	m.calledCount++
 	m.calledWith = append(m.calledWith, p.Channel)
 	m.lastTo = p.To
+	m.lastMessageID = p.MessageID
 	return "", m.err
 }
 
@@ -202,6 +199,38 @@ func (m *fakeQueueDepthTracker) Decrement(workspaceID uuid.UUID) {
 		m.decrements = make(map[uuid.UUID]int)
 	}
 	m.decrements[workspaceID]++
+}
+
+type recordedQueuePublish struct {
+	subject string
+	data    []byte
+	dedupID string
+}
+
+type recordingQueuePublisher struct {
+	published []recordedQueuePublish
+}
+
+func (p *recordingQueuePublisher) Publish(_ context.Context, subject string, data []byte, dedupID string) error {
+	p.published = append(p.published, recordedQueuePublish{
+		subject: subject,
+		data:    append([]byte(nil), data...),
+		dedupID: dedupID,
+	})
+	return nil
+}
+
+type recordingAuditWriter struct {
+	events []audit.Event
+}
+
+func (w *recordingAuditWriter) Write(event audit.Event) error {
+	w.events = append(w.events, event)
+	return nil
+}
+
+func (w *recordingAuditWriter) Close() error {
+	return nil
 }
 
 func getTestPool(t *testing.T) *pgxpool.Pool {
@@ -335,7 +364,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("Transient error triggers NAK, does not advance fallback", func(t *testing.T) {
+	t.Run("Explicit retryable response triggers NAK, does not advance fallback", func(t *testing.T) {
 		traceID := uuid.New().String()
 		qMsg := &domain.QueueMessage{
 			WorkspaceID:      ws.ID,
@@ -349,7 +378,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		msg := &fakeDispatchMsg{}
 
 		registry := channel.NewRegistry(nil)
-		disp1 := &fakeDispatcher{err: errors.New("network timeout")}
+		disp1 := &fakeDispatcher{err: errors.New("provider returned rate limit")}
 		registry.Register("whatsapp", disp1)
 
 		orchestrator := newTestOrchestrator(registry, dispatchRepo)
@@ -372,6 +401,104 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		}
 		if d.Status != "failed_transient" {
 			t.Errorf("expected DB status 'failed_transient', got %s", d.Status)
+		}
+		if d.ErrorMessage == nil || *d.ErrorMessage != deliveryTransientCode {
+			t.Fatalf("error_message=%v, want %q", d.ErrorMessage, deliveryTransientCode)
+		}
+	})
+
+	t.Run("Uncertain transport outcome never retries or falls back", func(t *testing.T) {
+		traceID := uuid.New().String()
+		qMsg := &domain.QueueMessage{
+			WorkspaceID:      ws.ID,
+			TraceID:          traceID,
+			To:               "+123",
+			Channel:          "whatsapp",
+			Body:             "response lost",
+			FallbackChannels: []string{"whatsapp_cloud"},
+		}
+		msg := &fakeDispatchMsg{}
+		registry := channel.NewRegistry(nil)
+		const sensitiveTransportDetail = "connection reset at https://api.example.invalid/bot-secret/send?to=+123"
+		primary := &fakeDispatcher{err: channel.NewUncertainError(errors.New(sensitiveTransportDetail))}
+		fallback := &fakeDispatcher{}
+		registry.Register("whatsapp", primary)
+		registry.Register("whatsapp_cloud", fallback)
+
+		publisher := &recordingQueuePublisher{}
+		auditWriter := &recordingAuditWriter{}
+		orchestrator := NewDispatchOrchestrator(
+			registry,
+			dispatchRepo,
+			publisher,
+			nil,
+			auditWriter,
+			nil,
+			5,
+			time.Minute,
+		)
+		_ = orchestrator.Process(ctx, msg, qMsg, 0)
+
+		if !msg.acked || msg.nacked {
+			t.Fatalf("uncertain message ack=%v nak=%v", msg.acked, msg.nacked)
+		}
+		if primary.calledCount != 1 || fallback.calledCount != 0 {
+			t.Fatalf("provider calls primary=%d fallback=%d", primary.calledCount, fallback.calledCount)
+		}
+		dispatch, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		if err != nil {
+			t.Fatalf("get uncertain dispatch: %v", err)
+		}
+		if dispatch.Status != "uncertain" {
+			t.Fatalf("status=%q, want uncertain", dispatch.Status)
+		}
+		if dispatch.ErrorMessage == nil || *dispatch.ErrorMessage != deliveryUncertainCode {
+			t.Fatalf("error_message=%v, want %q", dispatch.ErrorMessage, deliveryUncertainCode)
+		}
+		for _, event := range auditWriter.events {
+			if string(event.Payload) == "" || !json.Valid(event.Payload) {
+				t.Fatalf("invalid audit payload: %q", event.Payload)
+			}
+			if bytes.Contains(event.Payload, []byte(sensitiveTransportDetail)) {
+				t.Fatalf("sensitive transport detail leaked to audit: %s", event.Payload)
+			}
+		}
+		var uncertainEvent struct {
+			Event     string `json:"event"`
+			MessageID string `json:"message_id"`
+			Error     string `json:"error"`
+		}
+		foundUncertainFailure := false
+		for _, published := range publisher.published {
+			if published.subject != "webhooks.events" {
+				continue
+			}
+			if err := json.Unmarshal(published.data, &uncertainEvent); err != nil {
+				t.Fatalf("decode delivery event: %v", err)
+			}
+			if uncertainEvent.Event == "sending" || uncertainEvent.Event == "failed_transient" || uncertainEvent.Event == "uncertain" {
+				t.Fatalf("internal state leaked as public delivery event: %q", uncertainEvent.Event)
+			}
+			if uncertainEvent.Event == "failed" && uncertainEvent.Error == "DELIVERY_UNCERTAIN" {
+				foundUncertainFailure = true
+				if published.dedupID != traceID+".delivery.failed" {
+					t.Fatalf("uncertain failure dedup_id=%q", published.dedupID)
+				}
+			}
+		}
+		if !foundUncertainFailure {
+			t.Fatal("stable failed/DELIVERY_UNCERTAIN webhook event was not published")
+		}
+
+		redelivery := &fakeDispatchMsg{}
+		_ = orchestrator.Process(ctx, redelivery, qMsg, 1)
+		if !redelivery.acked || primary.calledCount != 1 || fallback.calledCount != 0 {
+			t.Fatalf(
+				"uncertain redelivery ack=%v primary=%d fallback=%d",
+				redelivery.acked,
+				primary.calledCount,
+				fallback.calledCount,
+			)
 		}
 	})
 
@@ -444,6 +571,9 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		if d.Status != "failed" {
 			t.Errorf("expected DB status 'failed', got %s", d.Status)
 		}
+		if d.ErrorMessage == nil || *d.ErrorMessage != deliveryFailedCode {
+			t.Fatalf("error_message=%v, want %q", d.ErrorMessage, deliveryFailedCode)
+		}
 	})
 
 	t.Run("TTL expired message is dropped", func(t *testing.T) {
@@ -472,6 +602,222 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		}
 		if disp1.calledCount != 0 {
 			t.Errorf("expected dispatcher NOT to be called for expired message, got %d", disp1.calledCount)
+		}
+		d, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		if err != nil {
+			t.Fatalf("failed to get expired dispatch from DB: %v", err)
+		}
+		if d.ErrorMessage == nil || *d.ErrorMessage != deliveryExpiredCode {
+			t.Fatalf("error_message=%v, want %q", d.ErrorMessage, deliveryExpiredCode)
+		}
+	})
+}
+
+func TestOrchestrator_DurableClaimPreventsCrossInstanceDuplicate(t *testing.T) {
+	pool := getTestPool(t)
+	ctx := context.Background()
+	wsRepo := repository.NewWorkspaceRepository(pool)
+	dispatchRepo := repository.NewMessageDispatchRepository(pool)
+
+	ws, err := wsRepo.Create(ctx, "orch_claim_"+uuid.New().String())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
+
+	dispatcher := &blockingConcurrentDispatcher{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	registry := channel.NewRegistry(map[string]channel.Dispatcher{
+		"whatsapp_mock": dispatcher,
+	})
+	first := newTestOrchestrator(registry, dispatchRepo)
+	second := newTestOrchestrator(registry, dispatchRepo)
+	qMsg := &domain.QueueMessage{
+		MessageID:   uuid.New(),
+		WorkspaceID: ws.ID,
+		TraceID:     "cross-instance-" + uuid.New().String(),
+		To:          "recipient",
+		Channel:     "whatsapp_mock",
+		Body:        "once",
+		QueuedAt:    time.Now().UTC(),
+	}
+	firstMsg := &fakeDispatchMsg{}
+	secondMsg := &fakeDispatchMsg{}
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+
+	go func() { firstDone <- first.Process(ctx, firstMsg, qMsg, 0) }()
+	select {
+	case <-dispatcher.entered:
+	case <-time.After(time.Second):
+		t.Fatal("first dispatch did not reach provider")
+	}
+	go func() { secondDone <- second.Process(ctx, secondMsg, qMsg, 0) }()
+
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		close(dispatcher.release)
+		t.Fatal("second orchestrator did not yield its duplicate claim")
+	}
+	if got := dispatcher.calls.Load(); got != 1 {
+		close(dispatcher.release)
+		t.Fatalf("provider calls=%d while first delivery is active, want 1", got)
+	}
+	if !secondMsg.nacked || secondMsg.acked || secondMsg.nakDelay <= 0 {
+		close(dispatcher.release)
+		t.Fatalf("duplicate message ack=%v nak=%v delay=%s", secondMsg.acked, secondMsg.nacked, secondMsg.nakDelay)
+	}
+
+	close(dispatcher.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first process: %v", err)
+	}
+	if !firstMsg.acked {
+		t.Fatal("first message was not acked")
+	}
+
+	redelivery := &fakeDispatchMsg{}
+	if err := second.Process(ctx, redelivery, qMsg, 1); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if !redelivery.acked {
+		t.Fatal("sent duplicate was not acked")
+	}
+	if got := dispatcher.calls.Load(); got != 1 {
+		t.Fatalf("provider calls after redelivery=%d, want 1", got)
+	}
+}
+
+func TestOrchestratorDeliveryEventsUseIngressReceipt(t *testing.T) {
+	pool := getTestPool(t)
+	ctx := context.Background()
+	wsRepo := repository.NewWorkspaceRepository(pool)
+	dispatchRepo := repository.NewMessageDispatchRepository(pool)
+	ws, err := wsRepo.Create(ctx, "orch_receipt_"+uuid.New().String())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
+
+	type deliveryEvent struct {
+		Event       string `json:"event"`
+		TraceID     string `json:"trace_id"`
+		MessageID   string `json:"message_id"`
+		Channel     string `json:"channel"`
+		WorkspaceID string `json:"workspace_id"`
+	}
+
+	t.Run("sent", func(t *testing.T) {
+		traceID := "pymes.v1." + ws.ID.String() + ".sent"
+		receiptID := uuid.New()
+		publisher := &recordingQueuePublisher{}
+		dispatcher := &fakeDispatcher{}
+		registry := channel.NewRegistry(map[string]channel.Dispatcher{"whatsapp_mock": dispatcher})
+		orchestrator := NewDispatchOrchestrator(
+			registry,
+			dispatchRepo,
+			publisher,
+			nil,
+			nil,
+			nil,
+			5,
+			time.Minute,
+		)
+		msg := &fakeDispatchMsg{}
+		err := orchestrator.Process(ctx, msg, &domain.QueueMessage{
+			MessageID:   receiptID,
+			WorkspaceID: ws.ID,
+			TraceID:     traceID,
+			To:          "local-recipient",
+			Channel:     "whatsapp_mock",
+			Body:        "test",
+			QueuedAt:    time.Now().UTC(),
+		}, 0)
+		if err != nil {
+			t.Fatalf("process sent: %v", err)
+		}
+		if dispatcher.lastMessageID != receiptID.String() {
+			t.Fatalf("dispatcher message_id=%q, want %s", dispatcher.lastMessageID, receiptID)
+		}
+
+		var sent *recordedQueuePublish
+		for i := range publisher.published {
+			var event deliveryEvent
+			if publisher.published[i].subject != "webhooks.events" {
+				continue
+			}
+			if err := json.Unmarshal(publisher.published[i].data, &event); err != nil {
+				t.Fatalf("decode event: %v", err)
+			}
+			if event.Event == "sent" {
+				sent = &publisher.published[i]
+				if event.MessageID != receiptID.String() ||
+					event.TraceID != traceID ||
+					event.Channel != "whatsapp_mock" ||
+					event.WorkspaceID != ws.ID.String() {
+					t.Fatalf("unexpected sent event: %+v", event)
+				}
+			}
+		}
+		if sent == nil {
+			t.Fatal("sent webhook event was not published")
+		}
+		if sent.dedupID != traceID+".delivery.sent" {
+			t.Fatalf("sent dedup id=%q", sent.dedupID)
+		}
+	})
+
+	t.Run("failed", func(t *testing.T) {
+		traceID := "pymes.v1." + ws.ID.String() + ".failed"
+		receiptID := uuid.New()
+		publisher := &recordingQueuePublisher{}
+		dispatcher := &fakeDispatcher{err: channel.NewTerminalError(errors.New("provider rejected"))}
+		registry := channel.NewRegistry(map[string]channel.Dispatcher{"whatsapp_mock": dispatcher})
+		orchestrator := NewDispatchOrchestrator(
+			registry,
+			dispatchRepo,
+			publisher,
+			nil,
+			nil,
+			nil,
+			5,
+			time.Minute,
+		)
+		msg := &fakeDispatchMsg{}
+		_ = orchestrator.Process(ctx, msg, &domain.QueueMessage{
+			MessageID:   receiptID,
+			WorkspaceID: ws.ID,
+			TraceID:     traceID,
+			To:          "local-recipient",
+			Channel:     "whatsapp_mock",
+			Body:        "test",
+			QueuedAt:    time.Now().UTC(),
+		}, 0)
+
+		var failed *recordedQueuePublish
+		for i := range publisher.published {
+			var event deliveryEvent
+			if publisher.published[i].subject != "webhooks.events" {
+				continue
+			}
+			if err := json.Unmarshal(publisher.published[i].data, &event); err != nil {
+				t.Fatalf("decode event: %v", err)
+			}
+			if event.Event == "failed" {
+				failed = &publisher.published[i]
+				if event.MessageID != receiptID.String() || event.TraceID != traceID {
+					t.Fatalf("unexpected failed event: %+v", event)
+				}
+			}
+		}
+		if failed == nil {
+			t.Fatal("failed webhook event was not published")
+		}
+		if failed.dedupID != traceID+".delivery.failed" {
+			t.Fatalf("failed dedup id=%q", failed.dedupID)
 		}
 	})
 }

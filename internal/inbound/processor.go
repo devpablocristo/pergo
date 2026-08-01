@@ -116,6 +116,18 @@ type MessageStatusUpdatedPayload struct {
 	Timestamp   string `json:"timestamp"`
 }
 
+// DeliveryEventPayload is the canonical contract consumed by webhook
+// subscribers such as Pymes.
+type DeliveryEventPayload struct {
+	Event       string `json:"event"`
+	TraceID     string `json:"trace_id"`
+	MessageID   string `json:"message_id"`
+	Channel     string `json:"channel"`
+	Timestamp   string `json:"timestamp"`
+	WorkspaceID string `json:"workspace_id"`
+	Error       string `json:"error,omitempty"`
+}
+
 type EventMedia struct {
 	MediaURL  string `json:"media_url"`
 	MediaType string `json:"media_type"`
@@ -178,7 +190,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 			slog.Warn("inbound processor: status_update received but dispatchRepo is nil")
 			return nil
 		}
-		dispatch, err := p.dispatchRepo.GetByProviderMessageID(ctx, ev.MessageID)
+		dispatch, err := p.dispatchRepo.GetByProviderMessageID(ctx, ev.WorkspaceID, ev.MessageID)
 		if err != nil {
 			if errors.Is(err, repository.ErrDispatchNotFound) {
 				slog.Warn("inbound processor: dispatch not found for status update", "provider_message_id", ev.MessageID)
@@ -193,20 +205,48 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		}
 
 		if p.publisher != nil {
+			timestamp := time.Now().UTC().Format(time.RFC3339)
 			payload := MessageStatusUpdatedPayload{
 				WorkspaceID: dispatch.WorkspaceID.String(),
 				DispatchID:  dispatch.ID.String(),
 				MessageID:   ev.MessageID,
 				Status:      ev.Body,
-				Timestamp:   time.Now().UTC().Format(time.RFC3339),
+				Timestamp:   timestamp,
 			}
 			eventData, err := json.Marshal(payload)
 			if err != nil {
 				return fmt.Errorf("inbound processor: failed to marshal status update payload: %w", err)
 			}
-			err = p.publisher.Publish(ctx, "messages.status_updated", eventData, dispatch.TraceID)
+			err = p.publisher.Publish(ctx, "messages.status_updated", eventData, dispatch.TraceID+".status."+ev.Body)
 			if err != nil {
 				return fmt.Errorf("inbound processor: failed to publish status update to NATS: %w", err)
+			}
+
+			if isCanonicalDeliveryStatus(ev.Body) {
+				messageID := dispatch.ID
+				if dispatch.ReceiptID != nil && *dispatch.ReceiptID != uuid.Nil {
+					messageID = *dispatch.ReceiptID
+				}
+				delivery := DeliveryEventPayload{
+					Event:       ev.Body,
+					TraceID:     dispatch.TraceID,
+					MessageID:   messageID.String(),
+					Channel:     dispatch.CurrentChannel,
+					Timestamp:   timestamp,
+					WorkspaceID: dispatch.WorkspaceID.String(),
+				}
+				deliveryData, marshalErr := json.Marshal(delivery)
+				if marshalErr != nil {
+					return fmt.Errorf("inbound processor: failed to marshal delivery event: %w", marshalErr)
+				}
+				if publishErr := p.publisher.Publish(
+					ctx,
+					"webhooks.events",
+					deliveryData,
+					dispatch.TraceID+".delivery."+ev.Body,
+				); publishErr != nil {
+					return fmt.Errorf("inbound processor: failed to publish delivery event: %w", publishErr)
+				}
 			}
 		}
 		return nil
@@ -226,7 +266,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		var err error
 		contact, err = p.contactRepo.ResolveContact(ctx, ev.WorkspaceID, ev.Channel, ev.From, ev.SenderName, username, phone)
 		if err != nil {
-			slog.Error("inbound processor: failed to resolve contact profile", "error", err)
+			slog.Error("inbound processor: failed to resolve contact profile", "error", err, "workspace_id", ev.WorkspaceID.String())
 		}
 
 		if contact != nil && !contact.BotActive && contact.BotPausedAt != nil {
@@ -247,7 +287,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 	if p.recipientSessionRepo != nil {
 		err := p.recipientSessionRepo.Upsert(ctx, ev.WorkspaceID, ev.From, ev.Channel, ev.To, time.Now().UTC())
 		if err != nil {
-			slog.Error("inbound processor: failed to upsert recipient session", "error", err)
+			slog.Error("inbound processor: failed to upsert recipient session", "error", err, "workspace_id", ev.WorkspaceID.String())
 		}
 	}
 
@@ -348,4 +388,13 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 	}
 
 	return nil
+}
+
+func isCanonicalDeliveryStatus(status string) bool {
+	switch status {
+	case "sent", "delivered", "read", "failed":
+		return true
+	default:
+		return false
+	}
 }

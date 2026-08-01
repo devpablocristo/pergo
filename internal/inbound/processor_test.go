@@ -468,6 +468,10 @@ func TestProcess_StatusUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create dispatch: %v", err)
 	}
+	receiptID := uuid.New()
+	if err := dispatchRepo.BindReceipt(ctx, d.ID, receiptID); err != nil {
+		t.Fatalf("failed to bind receipt: %v", err)
+	}
 
 	providerID := "wamid.test_status_update_999"
 	err = dispatchRepo.UpdateProviderMessageID(ctx, d.ID, providerID)
@@ -512,7 +516,7 @@ func TestProcess_StatusUpdate(t *testing.T) {
 	}
 
 	// 1. Verify dispatch record status is updated to "delivered"
-	updated, err := dispatchRepo.GetByProviderMessageID(ctx, providerID)
+	updated, err := dispatchRepo.GetByProviderMessageID(ctx, ws.ID, providerID)
 	if err != nil {
 		t.Fatalf("failed to retrieve updated dispatch: %v", err)
 	}
@@ -529,9 +533,9 @@ func TestProcess_StatusUpdate(t *testing.T) {
 		t.Errorf("expected contact resolution to be bypassed, but contact was created (count = %d)", count)
 	}
 
-	// 3. Verify NATS publish on messages.status_updated
-	if len(pub.published) != 1 {
-		t.Fatalf("expected 1 NATS publish, got %d", len(pub.published))
+	// 3. Verify the internal status event and canonical webhook delivery event.
+	if len(pub.published) != 2 {
+		t.Fatalf("expected 2 NATS publishes, got %d", len(pub.published))
 	}
 	pubEvent := pub.published[0]
 	if pubEvent.subject != "messages.status_updated" {
@@ -553,6 +557,41 @@ func TestProcess_StatusUpdate(t *testing.T) {
 	}
 	if payload.Status != "delivered" {
 		t.Errorf("expected status 'delivered', got %s", payload.Status)
+	}
+
+	deliveryEvent := pub.published[1]
+	if deliveryEvent.subject != "webhooks.events" {
+		t.Fatalf("expected subject webhooks.events, got %q", deliveryEvent.subject)
+	}
+	var delivery inbound.DeliveryEventPayload
+	if err := json.Unmarshal(deliveryEvent.data, &delivery); err != nil {
+		t.Fatalf("failed to unmarshal delivery payload: %v", err)
+	}
+	if delivery.Event != "delivered" ||
+		delivery.TraceID != traceID ||
+		delivery.MessageID != receiptID.String() ||
+		delivery.Channel != "whatsapp_cloud" ||
+		delivery.WorkspaceID != ws.ID.String() {
+		t.Fatalf("unexpected delivered event: %+v", delivery)
+	}
+
+	// A later read receipt is a distinct event (its NATS dedup identity includes
+	// the status) and keeps exactly the same public message_id.
+	event.Body = "read"
+	if err := proc.Process(ctx, event); err != nil {
+		t.Fatalf("Process read failed: %v", err)
+	}
+	if len(pub.published) != 4 {
+		t.Fatalf("expected 4 total NATS publishes, got %d", len(pub.published))
+	}
+	var readDelivery inbound.DeliveryEventPayload
+	if err := json.Unmarshal(pub.published[3].data, &readDelivery); err != nil {
+		t.Fatalf("failed to unmarshal read delivery payload: %v", err)
+	}
+	if pub.published[3].subject != "webhooks.events" ||
+		readDelivery.Event != "read" ||
+		readDelivery.MessageID != receiptID.String() {
+		t.Fatalf("unexpected read event subject=%q payload=%+v", pub.published[3].subject, readDelivery)
 	}
 }
 

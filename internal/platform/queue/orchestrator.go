@@ -3,10 +3,10 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,10 +22,22 @@ type QueueDepthTracker interface {
 	Decrement(workspaceID uuid.UUID)
 }
 
+// EventPublisher is the consumer-owned port for queue and webhook events.
+type EventPublisher interface {
+	Publish(ctx context.Context, subject string, data []byte, dedupID string) error
+}
+
 const (
 	orchDefaultMaxRetries  = 5
 	orchDefaultMaxBackoff  = 60 * time.Second
 	orchDefaultBaseBackoff = 1 * time.Second
+	orchDeliveryLease      = 2 * time.Minute
+	orchProviderTimeout    = 90 * time.Second
+	deliveryExpiredCode    = "DELIVERY_EXPIRED"
+	deliveryFailedCode     = "DELIVERY_FAILED"
+	deliveryTerminalCode   = "DELIVERY_TERMINAL"
+	deliveryTransientCode  = "DELIVERY_TRANSIENT"
+	deliveryUncertainCode  = "DELIVERY_UNCERTAIN"
 )
 
 // DispatchOrchestrator owns all outbound dispatch logic: idempotency,
@@ -34,23 +46,20 @@ const (
 type DispatchOrchestrator struct {
 	dispatchers  *channel.Registry
 	dispatchRepo *repository.MessageDispatchRepository
-	publisher    *JetStreamPublisher
+	publisher    EventPublisher
 	queueDepth   QueueDepthTracker
 	auditWriter  audit.Writer
 	contactRepo  *repository.ContactRepository
 
 	maxRetries int
 	maxBackoff time.Duration
-
-	// dispatched tracks trace IDs already processed (in-memory dedup fast path).
-	dispatched sync.Map // traceID string → struct{}
 }
 
 // NewDispatchOrchestrator creates an orchestrator with the given adapters.
 func NewDispatchOrchestrator(
 	dispatchers *channel.Registry,
 	dispatchRepo *repository.MessageDispatchRepository,
-	publisher *JetStreamPublisher,
+	publisher EventPublisher,
 	queueDepth QueueDepthTracker,
 	auditWriter audit.Writer,
 	contactRepo *repository.ContactRepository,
@@ -90,6 +99,7 @@ func (o *DispatchOrchestrator) Process(
 
 	// --- Database State Check / Idempotency ---
 	var dispatch *repository.MessageDispatch
+	var deliveryClaim repository.DispatchClaim
 	if o.dispatchRepo != nil && traceID != "" {
 		var err error
 		var tempName *string
@@ -102,26 +112,57 @@ func (o *DispatchOrchestrator) Process(
 			o.handleFailure(msg, workspaceID, traceID, attempt)
 			return err
 		}
+		if qMsg.MessageID != uuid.Nil {
+			if err := o.dispatchRepo.BindReceipt(ctx, dispatch.ID, qMsg.MessageID); err != nil {
+				slog.Error("orchestrator: failed to bind durable receipt", "error", err, "trace_id", traceID)
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
+			receiptID := qMsg.MessageID
+			dispatch.ReceiptID = &receiptID
+		}
 
-		if dispatch.Status == "sent" {
-			slog.Info("orchestrator: duplicate delivery prevented (status already sent)",
+		if terminalDispatchStatus(dispatch.Status) {
+			slog.Info("orchestrator: duplicate delivery prevented (terminal status)",
 				"trace_id", traceID,
+				"status", dispatch.Status,
 			)
 			o.ack(msg, workspaceID)
 			return nil
 		}
 
-		if dispatch.Status == "queued" {
-			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "queued", qMsg.Channel, nil)
+		var retryAfter time.Duration
+		deliveryClaim, retryAfter, err = o.dispatchRepo.ClaimDelivery(ctx, dispatch.ID, orchDeliveryLease)
+		if err != nil {
+			switch {
+			case errors.Is(err, repository.ErrDispatchTerminal):
+				o.ack(msg, workspaceID)
+				return nil
+			case errors.Is(err, repository.ErrDispatchDeliveryUncertain):
+				errorCode := deliveryUncertainCode
+				o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", dispatch.CurrentChannel, &errorCode)
+				o.ack(msg, workspaceID)
+				return nil
+			case errors.Is(err, repository.ErrDispatchClaimActive):
+				if retryAfter <= 0 {
+					retryAfter = time.Second
+				}
+				slog.Info("orchestrator: duplicate delivery deferred behind durable claim",
+					"trace_id", traceID,
+					"retry_after", retryAfter,
+				)
+				if nakErr := msg.NakWithDelay(retryAfter); nakErr != nil {
+					slog.Error("orchestrator: failed to defer duplicate delivery", "error", nakErr, "trace_id", traceID)
+				}
+				return err
+			default:
+				slog.Error("orchestrator: failed to claim provider delivery", "error", err, "trace_id", traceID)
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
 		}
-	}
-
-	// --- In-memory dedup fast path ---
-	if traceID != "" {
-		if _, loaded := o.dispatched.LoadOrStore(traceID, struct{}{}); loaded {
-			slog.Info("orchestrator: duplicate delivery prevented (in-memory)", "trace_id", traceID)
-			o.ack(msg, workspaceID)
-			return nil
+		if dispatch.Status == "queued" {
+			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "queued", qMsg.Channel, nil)
 		}
 	}
 
@@ -129,9 +170,23 @@ func (o *DispatchOrchestrator) Process(
 	if o.isExpired(qMsg) {
 		slog.Warn("orchestrator: message expired (TTL), dropping", "trace_id", traceID)
 		if o.dispatchRepo != nil && dispatch != nil {
-			errMsg := "message expired (TTL)"
-			_ = o.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, "failed", dispatch.CurrentChannel, dispatch.FallbackIndex, &errMsg)
-			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "failed", dispatch.CurrentChannel, &errMsg)
+			errMsg := deliveryExpiredCode
+			if err := o.dispatchRepo.UpdateClaimedDelivery(
+				ctx,
+				dispatch.ID,
+				deliveryClaim,
+				"failed",
+				dispatch.CurrentChannel,
+				dispatch.FallbackIndex,
+				&errMsg,
+				nil,
+				true,
+			); err != nil {
+				slog.Error("orchestrator: failed to persist expired delivery", "error", err, "trace_id", traceID)
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
+			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", dispatch.CurrentChannel, &errMsg)
 		}
 		o.ack(msg, workspaceID)
 		return nil
@@ -146,6 +201,16 @@ func (o *DispatchOrchestrator) Process(
 	allChannels := append([]string{qMsg.Channel}, qMsg.FallbackChannels...)
 	if startIndex < 0 || startIndex >= len(allChannels) {
 		slog.Error("orchestrator: fallback index out of bounds", "index", startIndex, "channels_count", len(allChannels), "trace_id", traceID)
+		if o.dispatchRepo != nil && dispatch != nil {
+			errMsg := deliveryFailedCode
+			if err := o.dispatchRepo.UpdateClaimedDelivery(
+				ctx, dispatch.ID, deliveryClaim, "failed", dispatch.CurrentChannel, dispatch.FallbackIndex, &errMsg, nil, true,
+			); err != nil {
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
+			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", dispatch.CurrentChannel, &errMsg)
+		}
 		o.ack(msg, workspaceID)
 		return nil
 	}
@@ -160,26 +225,48 @@ func (o *DispatchOrchestrator) Process(
 		currentIndex = i
 
 		if o.dispatchRepo != nil && dispatch != nil {
-			err := o.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, "sending", channelName, i, nil)
+			var err error
+			deliveryClaim, err = o.dispatchRepo.RenewDeliveryClaim(ctx, dispatch.ID, deliveryClaim, orchDeliveryLease)
+			if err != nil {
+				slog.Error("orchestrator: failed to renew provider delivery claim", "error", err, "trace_id", traceID)
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
+			err = o.dispatchRepo.UpdateClaimedDelivery(
+				ctx, dispatch.ID, deliveryClaim, "sending", channelName, i, nil, nil, false,
+			)
 			if err != nil {
 				slog.Error("orchestrator: failed to update status to sending", "error", err, "trace_id", traceID)
 				o.handleFailure(msg, workspaceID, traceID, attempt)
 				return err
 			}
-			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "sending", channelName, nil)
 		}
 
 		slog.Info("orchestrator: attempting dispatch", "channel", channelName, "trace_id", traceID, "index", i, "attempt", attempt)
-		respStr, err := o.dispatchToChannel(ctx, channelName, qMsg)
+		providerCtx, cancelProvider := context.WithTimeout(ctx, orchProviderTimeout)
+		respStr, err := o.dispatchToChannel(providerCtx, channelName, qMsg)
+		cancelProvider()
 		if err == nil {
 			if o.dispatchRepo != nil && dispatch != nil {
-				_ = o.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, "sent", channelName, i, nil)
+				var providerMessageID *string
 				if channelName == "whatsapp_cloud" && respStr != "" {
-					if errUpdate := o.dispatchRepo.UpdateProviderMessageID(ctx, dispatch.ID, respStr); errUpdate != nil {
-						slog.Error("orchestrator: failed to update provider message ID", "error", errUpdate, "dispatch_id", dispatch.ID, "wamid", respStr)
-					}
+					providerMessageID = &respStr
 				}
-				o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "sent", channelName, nil)
+				if errUpdate := o.dispatchRepo.UpdateClaimedDelivery(
+					ctx, dispatch.ID, deliveryClaim, "sent", channelName, i, nil, providerMessageID, true,
+				); errUpdate != nil {
+					slog.Error(
+						"orchestrator: provider accepted message but durable completion failed",
+						"error", errUpdate,
+						"dispatch_id", dispatch.ID,
+						"trace_id", traceID,
+					)
+					if nakErr := msg.NakWithDelay(time.Second); nakErr != nil {
+						slog.Error("orchestrator: failed to defer uncertain provider completion", "error", nakErr, "trace_id", traceID)
+					}
+					return errUpdate
+				}
+				o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "sent", channelName, nil)
 			}
 			slog.Info("orchestrator: message dispatched successfully", "channel", channelName, "trace_id", traceID)
 
@@ -198,15 +285,53 @@ func (o *DispatchOrchestrator) Process(
 		}
 
 		finalErr = err
+		if channel.IsUncertain(err) {
+			errMsg := deliveryUncertainCode
+			if o.dispatchRepo != nil && dispatch != nil {
+				if stateErr := o.dispatchRepo.UpdateClaimedDelivery(
+					ctx, dispatch.ID, deliveryClaim, "uncertain", channelName, i, &errMsg, nil, true,
+				); stateErr != nil {
+					slog.Error("orchestrator: failed to persist uncertain provider outcome", "error", stateErr, "trace_id", traceID)
+					if nakErr := msg.NakWithDelay(time.Second); nakErr != nil {
+						slog.Error("orchestrator: failed to defer uncertain provider outcome", "error", nakErr, "trace_id", traceID)
+					}
+					return stateErr
+				}
+				errorCode := deliveryUncertainCode
+				o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", channelName, &errorCode)
+			}
+			if o.auditWriter != nil {
+				auditPayload := map[string]any{
+					"request": qMsg,
+					"status":  "uncertain",
+					"error":   deliveryUncertainCode,
+				}
+				payloadBytes, _ := json.Marshal(auditPayload)
+				_ = o.auditWriter.Write(audit.NewEvent(workspaceID, traceID, "outbound_message", payloadBytes))
+			}
+			slog.Error(
+				"orchestrator: provider outcome uncertain; retry and fallback blocked",
+				"error_code", deliveryUncertainCode,
+				"channel", channelName,
+				"trace_id", traceID,
+			)
+			o.ack(msg, workspaceID)
+			return err
+		}
 		if channel.IsTerminal(err) {
-			slog.Warn("orchestrator: terminal error, triggering fallback", "channel", channelName, "error", err, "trace_id", traceID)
+			slog.Warn(
+				"orchestrator: terminal error, triggering fallback",
+				"channel", channelName,
+				"error_code", deliveryTerminalCode,
+				"trace_id", traceID,
+			)
 
 			if o.auditWriter != nil {
 				auditPayload := map[string]any{
 					"request":  qMsg,
 					"response": respStr,
 					"status":   "failed",
-					"error":    err.Error(),
+					"error":    deliveryTerminalCode,
 				}
 				payloadBytes, _ := json.Marshal(auditPayload)
 				_ = o.auditWriter.Write(audit.NewEvent(workspaceID, traceID, "outbound_message", payloadBytes))
@@ -215,19 +340,31 @@ func (o *DispatchOrchestrator) Process(
 		}
 
 		// Transient error — NAK with delay, JetStream retries
-		errMsg := err.Error()
+		errMsg := deliveryTransientCode
 		if o.dispatchRepo != nil && dispatch != nil {
-			_ = o.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, "failed_transient", channelName, i, &errMsg)
-			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "failed_transient", channelName, &errMsg)
+			if stateErr := o.dispatchRepo.UpdateClaimedDelivery(
+				ctx, dispatch.ID, deliveryClaim, "failed_transient", channelName, i, &errMsg, nil, true,
+			); stateErr != nil {
+				slog.Error("orchestrator: failed to release transient delivery claim", "error", stateErr, "trace_id", traceID)
+				if nakErr := msg.NakWithDelay(time.Second); nakErr != nil {
+					slog.Error("orchestrator: failed to defer uncertain transient result", "error", nakErr, "trace_id", traceID)
+				}
+				return stateErr
+			}
 		}
-		slog.Warn("orchestrator: transient error, NAK for retry", "channel", channelName, "error", err, "trace_id", traceID)
+		slog.Warn(
+			"orchestrator: transient error, NAK for retry",
+			"channel", channelName,
+			"error_code", deliveryTransientCode,
+			"trace_id", traceID,
+		)
 
 		if o.auditWriter != nil {
 			auditPayload := map[string]any{
 				"request":  qMsg,
 				"response": respStr,
 				"status":   "failed_transient",
-				"error":    err.Error(),
+				"error":    deliveryTransientCode,
 			}
 			payloadBytes, _ := json.Marshal(auditPayload)
 			_ = o.auditWriter.Write(audit.NewEvent(workspaceID, traceID, "outbound_message", payloadBytes))
@@ -238,14 +375,33 @@ func (o *DispatchOrchestrator) Process(
 	}
 
 	// All channels exhausted terminally
-	errMsg := "all channels failed: " + finalErr.Error()
+	errMsg := deliveryFailedCode
 	if o.dispatchRepo != nil && dispatch != nil {
-		_ = o.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, "failed", lastChannel, currentIndex, &errMsg)
-		o.publishWebhookEvent(ctx, workspaceID, traceID, dispatch.ID, "failed", lastChannel, &errMsg)
+		if err := o.dispatchRepo.UpdateClaimedDelivery(
+			ctx, dispatch.ID, deliveryClaim, "failed", lastChannel, currentIndex, &errMsg, nil, true,
+		); err != nil {
+			slog.Error("orchestrator: failed to persist terminal delivery failure", "error", err, "trace_id", traceID)
+			o.handleFailure(msg, workspaceID, traceID, attempt)
+			return err
+		}
+		o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", lastChannel, &errMsg)
 	}
-	slog.Error("orchestrator: all fallback channels exhausted (terminal failure)", "error", finalErr, "trace_id", traceID)
+	slog.Error(
+		"orchestrator: all fallback channels exhausted (terminal failure)",
+		"error_code", deliveryFailedCode,
+		"trace_id", traceID,
+	)
 	o.ack(msg, workspaceID)
 	return finalErr
+}
+
+func terminalDispatchStatus(status string) bool {
+	switch status {
+	case "sent", "delivered", "read", "failed", "uncertain":
+		return true
+	default:
+		return false
+	}
 }
 
 // SetContactRepository registers the Contact repository.
@@ -267,14 +423,18 @@ func (o *DispatchOrchestrator) dispatchToChannel(ctx context.Context, channelNam
 	to := qMsg.To
 	if channelName == "telegram" && o.contactRepo != nil {
 		if resolvedChatID, err := o.contactRepo.ResolveTelegramChatID(ctx, qMsg.WorkspaceID, qMsg.To); err == nil && resolvedChatID != "" {
-			slog.Info("orchestrator: resolved telegram contact identifier", "trace_id", qMsg.TraceID)
+			slog.Info("orchestrator: resolved telegram contact identifier", "trace_id", qMsg.TraceID, "workspace_id", qMsg.WorkspaceID.String())
 			to = resolvedChatID
 			qMsg.To = resolvedChatID // Normalize so that audit logs also use the resolved numeric ID
 		}
 	}
 
+	messageID := qMsg.TraceID
+	if qMsg.MessageID != uuid.Nil {
+		messageID = qMsg.MessageID.String()
+	}
 	return dispatcher.Dispatch(ctx, &channel.MessagePayload{
-		MessageID:        qMsg.TraceID,
+		MessageID:        messageID,
 		ConnectionID:     qMsg.ConnectionID,
 		SenderIdentity:   qMsg.SenderIdentity,
 		TraceID:          qMsg.TraceID,
@@ -351,7 +511,7 @@ func retryAttempt(msg DispatchMessage) int {
 }
 
 // publishWebhookEvent creates and publishes a status event to NATS.
-func (o *DispatchOrchestrator) publishWebhookEvent(ctx context.Context, workspaceID uuid.UUID, traceID string, dispatchID uuid.UUID, event string, channelName string, errMsg *string) {
+func (o *DispatchOrchestrator) publishWebhookEvent(ctx context.Context, workspaceID uuid.UUID, traceID string, messageID uuid.UUID, event string, channelName string, errMsg *string) {
 	if o.publisher == nil {
 		return
 	}
@@ -367,7 +527,7 @@ func (o *DispatchOrchestrator) publishWebhookEvent(ctx context.Context, workspac
 	}{
 		Event:       event,
 		TraceID:     traceID,
-		MessageID:   dispatchID.String(),
+		MessageID:   messageID.String(),
 		Channel:     channelName,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		WorkspaceID: workspaceID.String(),
@@ -382,7 +542,17 @@ func (o *DispatchOrchestrator) publishWebhookEvent(ctx context.Context, workspac
 		return
 	}
 
-	if err := o.publisher.Publish(ctx, "webhooks.events", payload, traceID); err != nil {
+	if err := o.publisher.Publish(ctx, "webhooks.events", payload, traceID+".delivery."+event); err != nil {
 		slog.Error("orchestrator: failed to publish webhook event", "error", err, "trace_id", traceID)
 	}
+}
+
+func dispatchReceiptID(dispatch *repository.MessageDispatch) uuid.UUID {
+	if dispatch != nil && dispatch.ReceiptID != nil && *dispatch.ReceiptID != uuid.Nil {
+		return *dispatch.ReceiptID
+	}
+	if dispatch != nil {
+		return dispatch.ID
+	}
+	return uuid.Nil
 }

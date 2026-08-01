@@ -227,6 +227,7 @@ func main() {
 	dedupRepo := repository.NewInboundDedupRepository(pool)
 	wsRepo := repository.NewWorkspaceRepository(pool)
 	dispatchRepo := repository.NewMessageDispatchRepository(pool)
+	messageIngressLedger := repository.NewMessageIngressLedgerRepository(pool)
 	auditRepo := repository.NewAuditRepository(pool)
 
 	integrationRepo := repository.NewIntegrationRepository(pool, encryptor)
@@ -383,8 +384,9 @@ func main() {
 	// --- Message handler (POST /messages) ---
 	outboundProcessor := outbound.NewProcessor(queueDepth, mediaEngine, connectionRepo, publisher)
 	messageHandler := &handler.MessageHandler{
-		Ingestor:    outboundProcessor,
-		Idempotency: messageIdempotencyRepo,
+		Ingestor:      outboundProcessor,
+		IngressLedger: messageIngressLedger,
+		Idempotency:   messageIdempotencyRepo,
 	}
 	messageHandler.RegisterRoutes(e, middleware.RateLimiterMiddleware(rateLimiter))
 

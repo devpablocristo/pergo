@@ -22,36 +22,35 @@ Envia uma mensagem (texto, mídia ou template) para um canal específico (Telegr
 
 * **Endpoint:** `POST /api/v1/messages`
 * **Content-Type:** `application/json`
-* **Idempotency-Key:** chave opaca de 1 a 255 caracteres, iniciada por letra ou
-  número e restrita a letras, números, `.`, `_`, `:`, `/` e `-`. É opcional
-  para clientes legados e obrigatória para integrações que precisam de
-  recuperação segura após timeout.
+* **Cabeçalhos obrigatórios:**
+  * `Idempotency-Key`: identidade da operação dentro do Workspace. Deve ter de
+    1 a 255 caracteres, começar com letra ou número e conter somente letras,
+    números, `.`, `_`, `:`, `/` ou `-`.
+  * `X-Trace-ID`: identidade estável de correlação e deduplicação (1–255 caracteres).
 * **Respostas:**
   * `202 Accepted` — Mensagem recebida com sucesso e enfileirada para envio durável.
   * `400 Bad Request` — Payload inválido ou malformado.
   * `401 Unauthorized` — Chave de API inválida ou ausente.
-  * `409 Conflict` — A mesma `Idempotency-Key` já foi usada neste Workspace
-    com outro payload (`idempotency_key_reused`).
-  * `425 Too Early` — Uma requisição concorrente com a mesma chave ainda está
-    sendo aceita; repetir após o valor de `Retry-After`.
+  * `409 Conflict` — A chave de idempotência foi reutilizada com outro payload ou Trace ID.
+  * `413 Payload Too Large` — O corpo HTTP excede 1 MiB.
+  * `425 Too Early` — Outra requisição idêntica ainda detém o claim de publicação; respeite `Retry-After`.
   * `429 Too Many Requests` — A fila de mensagens do seu Workspace atingiu o limite de capacidade de retenção de backpressure (padrão: 1.000 mensagens pendentes).
 
-### Idempotência durável
-
-PerGo associa a chave ao Workspace autenticado, ao hash canônico do payload, ao
-`X-Trace-ID` original e a um receipt estável. Depois de um `202`, uma repetição
-idêntica devolve o mesmo `message_id`, `queued_at` e `X-Trace-ID`, com
-`Idempotency-Replayed: true`, sem publicar novamente. A garantia sobrevive a
-reinícios porque o ledger fica em PostgreSQL.
-
-Se o processo cair na pequena janela entre o aceite do JetStream e a gravação
-do receipt, a lease expira e a requisição pode ser retomada. O publish conserva
-o mesmo `X-Trace-ID`, e o stream mantém uma janela de deduplicação de 24 horas.
-Isso evita duplicação na ingestão e no retry HTTP; não transforma APIs externas
-de WhatsApp em exactly-once diante de uma queda depois que o provedor enviou.
-O ledger é conservado durante toda a vida do Workspace e removido por cascade
-somente quando o Workspace é excluído; não há expiração silenciosa que permita
-reutilizar uma chave antiga.
+Uma repetição com o mesmo Workspace, `Idempotency-Key`, `X-Trace-ID` e corpo
+retorna novamente `202` com o mesmo `message_id` e `queued_at`, sem uma nova
+publicação, e inclui `Idempotency-Replayed: true`. O ledger permanece no
+PostgreSQL durante toda a vida do Workspace. Se o processo cair depois de o
+JetStream aceitar a publicação, o retry reutiliza o mesmo receipt, Trace ID e
+identificador de deduplicação; o claim vencido pode ser retomado com fencing.
+O `message_id` é o receipt público estável e também identifica os
+eventos de entrega `queued`, `sent`, `delivered`, `read` e `failed`.
+`sending`, `failed_transient` e `uncertain` são estados internos e nunca nomes
+de eventos públicos. Quando a resposta do provedor é ambígua, PerGo não repete
+nem usa fallback: publica `failed` com `error: "DELIVERY_UNCERTAIN"` para
+reconciliação operacional.
+Os outros códigos públicos de falha produzidos pelo worker são
+`DELIVERY_EXPIRED` e `DELIVERY_FAILED`; detalhes brutos de transporte ou do
+provedor não fazem parte do contrato e não são persistidos nem publicados.
 
 ### Payload Padrão (Mensagem de Texto)
 

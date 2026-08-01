@@ -274,15 +274,11 @@ func (c *ChatwootClient) checkResponse(resp *http.Response) error {
 		return ErrNotFound
 	}
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	errMsg := string(bodyBytes)
-	if errMsg == "" {
-		errMsg = resp.Status
-	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		return fmt.Errorf("%w: status %d, body: %s", ErrTerminal, resp.StatusCode, errMsg)
+		return fmt.Errorf("%w: status %d", ErrTerminal, resp.StatusCode)
 	}
 
-	return fmt.Errorf("server error: status %d, body: %s", resp.StatusCode, errMsg)
+	return fmt.Errorf("server error: status %d", resp.StatusCode)
 }

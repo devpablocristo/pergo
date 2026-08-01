@@ -91,8 +91,8 @@ func (c *Client) StartChat(ctx context.Context, apiURL, botID, publicToken strin
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("typebot API error (startChat): status %d body %s", resp.StatusCode, string(body))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "", nil, fmt.Errorf("typebot API error (startChat): status %d", resp.StatusCode)
 	}
 
 	var res StartChatResponse
@@ -134,8 +134,8 @@ func (c *Client) ContinueChat(ctx context.Context, apiURL, sessionID, publicToke
 	}
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("typebot API error (continueChat): status %d body %s", resp.StatusCode, string(body))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("typebot API error (continueChat): status %d", resp.StatusCode)
 	}
 
 	var res ContinueChatResponse

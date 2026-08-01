@@ -226,7 +226,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		var err error
 		contact, err = p.contactRepo.ResolveContact(ctx, ev.WorkspaceID, ev.Channel, ev.From, ev.SenderName, username, phone)
 		if err != nil {
-			slog.Error("inbound processor: failed to resolve contact profile", "error", err, "from", ev.From)
+			slog.Error("inbound processor: failed to resolve contact profile", "error", err)
 		}
 
 		if contact != nil && !contact.BotActive && contact.BotPausedAt != nil {
@@ -247,7 +247,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 	if p.recipientSessionRepo != nil {
 		err := p.recipientSessionRepo.Upsert(ctx, ev.WorkspaceID, ev.From, ev.Channel, ev.To, time.Now().UTC())
 		if err != nil {
-			slog.Error("inbound processor: failed to upsert recipient session", "error", err, "from", ev.From)
+			slog.Error("inbound processor: failed to upsert recipient session", "error", err)
 		}
 	}
 

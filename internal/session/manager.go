@@ -182,7 +182,6 @@ func (m *Manager) ReconnectAll(ctx context.Context) error {
 				slog.Error("session manager: failed to reconnect device",
 					"error", err,
 					"device_id", d.ID,
-					"jid", *d.JID,
 				)
 				if updateErr := m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusDisconnected)); updateErr != nil && ctx.Err() == nil {
 					slog.Error("session manager: failed to mark device disconnected", "error", updateErr, "device_id", d.ID)
@@ -205,7 +204,6 @@ func (m *Manager) ReconnectAll(ctx context.Context) error {
 // attempts to connect. On success, it registers the session and dispatcher.
 func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection) error {
 	slog.Info("session manager: reconnecting device",
-		"jid", *d.JID,
 		"device_id", d.ID,
 	)
 

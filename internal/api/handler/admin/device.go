@@ -20,6 +20,7 @@ import (
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/i18n"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/session"
 	"github.com/pablojhp.pergo/templates/pages"
@@ -104,13 +105,13 @@ func (h *DeviceHandler) StartPairing(c *echo.Context) error {
 	}
 
 	if phone == "" {
-		return c.String(http.StatusBadRequest, "phone number is required")
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.phone_required"))
 	}
 
 	wsID := resolveWorkspaceID(c)
 
 	// Initialize pairing state.
-	ps := &pairingState{status: "pending", message: "Waiting for QR code..."}
+	ps := &pairingState{status: "pending"}
 	pairingSessionsMu.Lock()
 	pairingSessions[phone] = ps
 	pairingSessionsMu.Unlock()
@@ -157,7 +158,7 @@ func (h *DeviceHandler) StartPairing(c *echo.Context) error {
 		})
 	}()
 
-	return mw.Render(c, http.StatusOK, pages.QRFragment("", phone, "pending", "Scan the QR code below to pair your device"))
+	return mw.Render(c, http.StatusOK, pages.QRFragment("", phone, "pending", ""))
 }
 
 // GetQR returns the current QR code state as an HTMX fragment.
@@ -173,7 +174,7 @@ func (h *DeviceHandler) GetQR(c *echo.Context) error {
 	pairingSessionsMu.Unlock()
 
 	if !ok {
-		return mw.Render(c, http.StatusOK, pages.QRFragment("", phone, "error", "No active pairing session for this phone"))
+		return mw.Render(c, http.StatusOK, pages.QRFragment("", phone, "error", i18n.T(c.Request().Context(), "qr.no_session")))
 	}
 
 	ps.mu.RLock()

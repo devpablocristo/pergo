@@ -2,6 +2,7 @@ package pages
 
 import (
 	"fmt"
+	"github.com/pablojhp.pergo/internal/i18n"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/templates/components"
 	"github.com/pablojhp.pergo/templates/layout"
@@ -9,15 +10,15 @@ import (
 
 // DeviceListPage renders the full connection management page with layout.
 templ DeviceListPage(connections []*repository.Connection) {
-	@layout.Base("Conexões", DeviceListContent(connections))
+	@layout.Base(i18n.T(ctx, "nav.connections"), DeviceListContent(connections))
 }
 
 // DeviceListContent renders the connection list content (HTMX fragment or full page body).
 templ DeviceListContent(connections []*repository.Connection) {
 	<div class="border-b border-zinc-200 pb-5 mb-8 flex justify-between items-end">
 		<div>
-			<h1 class="text-2xl font-bold tracking-tight text-zinc-900">Conexões</h1>
-			<p class="text-zinc-500 text-sm mt-1">Conecte e autentique seus canais de comunicação unificados.</p>
+			<h1 class="text-2xl font-bold tracking-tight text-zinc-900">{ i18n.T(ctx, "nav.connections") }</h1>
+			<p class="text-zinc-500 text-sm mt-1">{ i18n.T(ctx, "devices.description") }</p>
 		</div>
 		<button
 			class="btn btn-black bg-zinc-950 text-white hover:bg-zinc-900 border-none btn-sm font-semibold px-4 py-2 rounded-md transition"
@@ -25,7 +26,7 @@ templ DeviceListContent(connections []*repository.Connection) {
 			hx-target="#modal-container"
 			hx-swap="innerHTML"
 		>
-			Nova Conexão
+			{ i18n.T(ctx, "Nova Conexão") }
 		</button>
 	</div>
 	<div id="connections-table-container" class="bg-white border border-zinc-200 rounded-lg p-6 shadow-sm mb-6">
@@ -41,12 +42,12 @@ templ ConnectionTable(connections []*repository.Connection) {
 		<table class="table min-w-full divide-y divide-zinc-200" id="device-table">
 			<thead class="bg-zinc-50 text-zinc-500 text-xs font-semibold uppercase tracking-wider text-left border-b border-zinc-200">
 				<tr>
-					<th class="px-6 py-3">Nome</th>
-					<th class="px-6 py-3">Canal</th>
-					<th class="px-6 py-3">Status</th>
-					<th class="px-6 py-3">Identidade</th>
-					<th class="px-6 py-3">Conectado Desde</th>
-					<th class="px-6 py-3 text-right">Ações</th>
+					<th class="px-6 py-3">{ i18n.T(ctx, "Nome") }</th>
+					<th class="px-6 py-3">{ i18n.T(ctx, "Canal") }</th>
+					<th class="px-6 py-3">{ i18n.T(ctx, "Status") }</th>
+					<th class="px-6 py-3">{ i18n.T(ctx, "devices.identity") }</th>
+					<th class="px-6 py-3">{ i18n.T(ctx, "devices.connected_since") }</th>
+					<th class="px-6 py-3 text-right">{ i18n.T(ctx, "Ações") }</th>
 				</tr>
 			</thead>
 			<tbody id="device-list-body" class="divide-y divide-zinc-200 text-sm text-zinc-700 bg-white">
@@ -55,7 +56,7 @@ templ ConnectionTable(connections []*repository.Connection) {
 				}
 				if len(connections) == 0 {
 					<tr>
-						<td colspan="6" class="px-6 py-12 text-center text-zinc-400">Nenhuma conexão cadastrada. Clique em "Nova Conexão" para começar.</td>
+						<td colspan="6" class="px-6 py-12 text-center text-zinc-400">{ i18n.T(ctx, "devices.empty") }</td>
 					</tr>
 				}
 			</tbody>
@@ -76,7 +77,7 @@ templ ConnectionRow(conn *repository.Connection) {
 		<td class="px-6 py-4 font-mono text-xs text-zinc-500">{ conn.SenderIdentity }</td>
 		<td class="px-6 py-4 text-xs font-mono text-zinc-500">
 			if conn.ConnectedSince != nil {
-				{ conn.ConnectedSince.Format("02/01/2006 15:04:05") }
+				{ i18n.FormatDateTimeSeconds(ctx, *conn.ConnectedSince) }
 			} else {
 				<span class="text-zinc-300">—</span>
 			}
@@ -87,7 +88,7 @@ templ ConnectionRow(conn *repository.Connection) {
 					href={ templ.URL("/admin/inbox?channel=" + conn.Channel) }
 					class="btn btn-ghost hover:bg-zinc-100 text-zinc-700 btn-xs font-semibold"
 				>
-					Inbox
+					{ i18n.T(ctx, "nav.inbox") }
 				</a>
 				<button
 					class="btn btn-ghost hover:bg-zinc-100 text-zinc-700 btn-xs font-semibold"
@@ -95,16 +96,16 @@ templ ConnectionRow(conn *repository.Connection) {
 					hx-target="body"
 					hx-swap="beforeend"
 				>
-					Testar
+					{ i18n.T(ctx, "Testar") }
 				</button>
 				<button
 					class="btn btn-ghost hover:bg-rose-50 text-rose-600 btn-xs font-semibold"
 					hx-delete={ "/admin/devices/" + conn.ID.String() }
 					hx-target="#connections-table-container"
 					hx-swap="innerHTML"
-					hx-confirm={ "Tem certeza que deseja excluir a conexão " + conn.Name + "?" }
+					hx-confirm={ i18n.T(ctx, "devices.delete_confirm", conn.Name) }
 				>
-					Excluir
+					{ i18n.T(ctx, "Excluir") }
 				</button>
 			</div>
 		</td>
@@ -124,7 +125,7 @@ templ ChannelIcon(channel string) {
 			</span>
 		case "whatsapp_mock":
 			<span class="badge badge-sm bg-violet-50 text-violet-700 border-violet-200 px-2 py-0.5 text-xs font-semibold">
-				WhatsApp Mock (Local)
+				{ i18n.T(ctx, "channel.whatsapp_mock") }
 			</span>
 		case "telegram":
 			<span class="badge badge-sm bg-sky-50 text-sky-700 border-sky-200 px-2 py-0.5 text-xs font-semibold">
@@ -141,13 +142,13 @@ templ ChannelIcon(channel string) {
 templ ConnectionStatusBadge(status string) {
 	switch status {
 		case "connected", "active":
-			<span class="badge badge-sm bg-emerald-50 text-emerald-700 border-emerald-200 px-2 py-0.5 text-xs font-semibold">Conectado</span>
+			<span class="badge badge-sm bg-emerald-50 text-emerald-700 border-emerald-200 px-2 py-0.5 text-xs font-semibold">{ i18n.T(ctx, "status.connected") }</span>
 		case "disconnected":
-			<span class="badge badge-sm bg-amber-50 text-amber-700 border-amber-200 px-2 py-0.5 text-xs font-semibold">Desconectado</span>
+			<span class="badge badge-sm bg-amber-50 text-amber-700 border-amber-200 px-2 py-0.5 text-xs font-semibold">{ i18n.T(ctx, "status.disconnected") }</span>
 		case "terminal":
-			<span class="badge badge-sm bg-rose-50 text-rose-700 border-rose-200 px-2 py-0.5 text-xs font-semibold">Terminal</span>
+			<span class="badge badge-sm bg-rose-50 text-rose-700 border-rose-200 px-2 py-0.5 text-xs font-semibold">{ i18n.T(ctx, "status.terminal") }</span>
 		case "pending":
-			<span class="badge badge-sm bg-blue-50 text-blue-700 border-blue-200 px-2 py-0.5 text-xs font-semibold">Pendente</span>
+			<span class="badge badge-sm bg-blue-50 text-blue-700 border-blue-200 px-2 py-0.5 text-xs font-semibold">{ i18n.T(ctx, "status.pending") }</span>
 		default:
 			<span class="badge badge-sm bg-zinc-100 text-zinc-700 border-zinc-200 px-2 py-0.5 text-xs font-semibold">{ status }</span>
 	}
@@ -309,16 +310,18 @@ templ PairForm(whatsappMockEnabled bool) {
 templ QRFragment(code string, phone string, status string, message string) {
 	<div class="qr-fragment" id="qr-area">
 		@components.BanWarning()
-		<p class="qr-status mb-2 text-sm text-zinc-600">{ message }</p>
+		if status == "error" && message != "" {
+			<p class="qr-status mb-2 text-sm text-zinc-600">{ message }</p>
+		}
 		switch status {
 			case "pending":
 				if code != "" {
 					<div class="qr-container bg-zinc-50 border border-zinc-200 rounded p-4 flex flex-col items-center">
-						<p class="qr-hint text-xs text-zinc-500 mb-2">Escaneie o código abaixo com o WhatsApp do seu celular:</p>
+				<p class="qr-hint text-xs text-zinc-500 mb-2">{ i18n.T(ctx, "qr.scan") }</p>
 						<div
 							class="qr-code-raw bg-white p-2 border border-zinc-300 rounded font-mono text-xs select-all break-all"
 							data-qr={ code }
-							aria-label="QR Code"
+					aria-label={ i18n.T(ctx, "qr.code_label") }
 						>
 							<code>{ code }</code>
 						</div>
@@ -326,7 +329,7 @@ templ QRFragment(code string, phone string, status string, message string) {
 				} else {
 					<div class="qr-loading flex flex-col items-center py-4">
 						<div class="spinner border-2 border-zinc-900 border-t-transparent rounded-full w-6 h-6 animate-spin mb-2"></div>
-						<p class="text-xs text-zinc-500">Gerando QR code...</p>
+						<p class="text-xs text-zinc-500">{ i18n.T(ctx, "qr.loading") }</p>
 					</div>
 				}
 				<div
@@ -338,7 +341,7 @@ templ QRFragment(code string, phone string, status string, message string) {
 			case "paired":
 				<div class="qr-success text-center py-4">
 					<p class="success-icon text-2xl mb-1">✅</p>
-					<p class="text-sm font-semibold text-zinc-950">Dispositivo pareado com sucesso!</p>
+					<p class="text-sm font-semibold text-zinc-950">{ i18n.T(ctx, "qr.paired") }</p>
 					<button
 						class="btn btn-black mt-3 bg-zinc-950 hover:bg-zinc-900 text-white px-4 py-2 rounded-md font-semibold border-none"
 						onclick="
@@ -352,13 +355,13 @@ templ QRFragment(code string, phone string, status string, message string) {
 							this.closest('.modal-backdrop').remove();
 						"
 					>
-						Ver Conexões
+						{ i18n.T(ctx, "qr.view_connections") }
 					</button>
 				</div>
 			case "error":
 				<div class="qr-error text-center py-4">
 					<p class="error-icon text-2xl mb-1">❌</p>
-					<p class="text-sm font-semibold text-zinc-950">Falha no pareamento. Tente novamente.</p>
+					<p class="text-sm font-semibold text-zinc-950">{ i18n.T(ctx, "qr.error") }</p>
 					<button
 						class="btn btn-secondary mt-3 px-4 py-2 border border-zinc-300 rounded-md text-zinc-700 hover:bg-zinc-50 font-medium"
 						onclick="
@@ -371,7 +374,7 @@ templ QRFragment(code string, phone string, status string, message string) {
 							this.closest('.modal-backdrop').remove();
 						"
 					>
-						Tentar Novamente
+						{ i18n.T(ctx, "qr.retry") }
 					</button>
 				</div>
 		}

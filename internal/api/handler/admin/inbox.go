@@ -14,22 +14,131 @@ import (
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/i18n"
+	"github.com/pablojhp.pergo/internal/inbound"
 	"github.com/pablojhp.pergo/internal/platform/queue"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/templates/components"
 	"github.com/pablojhp.pergo/templates/pages"
 )
 
+// InboundEventProcessor is the ingestion contract used by the local mock.
+type InboundEventProcessor interface {
+	Process(context.Context, *inbound.InboundEvent) error
+}
+
+// InboxConnectionStore is the connection lookup contract used by Inbox.
+type InboxConnectionStore interface {
+	ListByWorkspace(context.Context, uuid.UUID) ([]*repository.Connection, error)
+	GetByID(context.Context, uuid.UUID) (*repository.Connection, error)
+	GetBySenderIdentity(context.Context, uuid.UUID, string) (*repository.Connection, error)
+	GetDefaultChannelConnection(context.Context, uuid.UUID, string) (*repository.Connection, error)
+}
+
 // InboxHandler holds dependencies for the conversational inbox.
 type InboxHandler struct {
-	Repo           *repository.AuditRepository
-	Sessions       *repository.RecipientSessionRepository
-	Workspaces     *repository.WorkspaceRepository
-	Connections    *repository.ConnectionRepository
-	Publisher      *queue.JetStreamPublisher
-	Templates      *repository.WABATemplateRepository
-	ContactRepo    *repository.ContactRepository
-	UserActionLogs *repository.UserActionLogRepository
+	Repo                *repository.AuditRepository
+	Sessions            *repository.RecipientSessionRepository
+	Workspaces          *repository.WorkspaceRepository
+	Connections         InboxConnectionStore
+	Publisher           *queue.JetStreamPublisher
+	Templates           *repository.WABATemplateRepository
+	ContactRepo         *repository.ContactRepository
+	UserActionLogs      *repository.UserActionLogRepository
+	InboundProcessor    InboundEventProcessor
+	WhatsAppMockEnabled bool
+}
+
+// MockInboundModal renders the local-only inbound simulator.
+func (h *InboxHandler) MockInboundModal(c *echo.Context) error {
+	if !h.WhatsAppMockEnabled {
+		return c.NoContent(http.StatusNotFound)
+	}
+
+	workspaceID := resolveWorkspaceID(c)
+	if workspaceID == uuid.Nil {
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.workspace_required"))
+	}
+	if h.Connections == nil {
+		return c.String(http.StatusServiceUnavailable, i18n.T(c.Request().Context(), "error.connection_repository"))
+	}
+
+	connections, err := h.Connections.ListByWorkspace(c.Request().Context(), workspaceID)
+	if err != nil {
+		return c.String(http.StatusInternalServerError, i18n.T(c.Request().Context(), "error.mock_connections_load"))
+	}
+
+	mockConnections := make([]*repository.Connection, 0, len(connections))
+	for _, conn := range connections {
+		if conn.Channel == "whatsapp_mock" && conn.Status == "connected" {
+			mockConnections = append(mockConnections, conn)
+		}
+	}
+	if len(mockConnections) == 0 {
+		return c.HTML(http.StatusUnprocessableEntity, `<div class="p-3 text-sm text-amber-800">Creá primero una conexión WhatsApp Mock activa.</div>`)
+	}
+
+	return mw.Render(c, http.StatusOK, components.MockInboundModal(mockConnections))
+}
+
+// SimulateMockInbound injects a local message into the regular inbound pipeline.
+// It never contacts WhatsApp or Meta.
+func (h *InboxHandler) SimulateMockInbound(c *echo.Context) error {
+	if !h.WhatsAppMockEnabled {
+		return c.NoContent(http.StatusNotFound)
+	}
+	if h.InboundProcessor == nil {
+		return c.String(http.StatusServiceUnavailable, i18n.T(c.Request().Context(), "error.mock_processor"))
+	}
+	if h.Connections == nil {
+		return c.String(http.StatusServiceUnavailable, i18n.T(c.Request().Context(), "error.connection_repository"))
+	}
+
+	workspaceID := resolveWorkspaceID(c)
+	if workspaceID == uuid.Nil {
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.workspace_required"))
+	}
+
+	connectionID, err := uuid.Parse(c.FormValue("connection_id"))
+	if err != nil {
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.mock_connection_invalid"))
+	}
+	conn, err := h.Connections.GetByID(c.Request().Context(), connectionID)
+	if err != nil ||
+		conn.WorkspaceID != workspaceID ||
+		conn.Channel != "whatsapp_mock" ||
+		conn.Status != "connected" {
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.mock_connection_invalid"))
+	}
+
+	from := strings.TrimSpace(c.FormValue("from"))
+	body := strings.TrimSpace(c.FormValue("body"))
+	name := strings.TrimSpace(c.FormValue("name"))
+	if from == "" || body == "" {
+		return c.String(http.StatusBadRequest, i18n.T(c.Request().Context(), "error.sender_body_required"))
+	}
+	if name == "" {
+		name = from
+	}
+
+	event := &inbound.InboundEvent{
+		WorkspaceID:  workspaceID,
+		ConnectionID: conn.ID,
+		MessageID:    "whatsapp-mock-inbound-" + uuid.NewString(),
+		Channel:      "whatsapp_mock",
+		From:         from,
+		To:           conn.SenderIdentity,
+		SenderName:   name,
+		Body:         body,
+		Metadata:     map[string]string{"source": "local_mock"},
+	}
+	if err := h.InboundProcessor.Process(c.Request().Context(), event); err != nil {
+		slog.Error("admin: local mock inbound simulation failed", "error", err, "workspace_id", workspaceID)
+		return c.String(http.StatusInternalServerError, i18n.T(c.Request().Context(), "error.mock_simulation"))
+	}
+
+	c.Response().Header().Set("HX-Redirect", "/admin/inbox?connection="+conn.SenderIdentity)
+	return c.NoContent(http.StatusNoContent)
 }
 
 // resolveWorkspaceID reads the active workspace from the cookie.
@@ -160,7 +269,7 @@ func (h *InboxHandler) ChatPanel(c *echo.Context) error {
 	var replyOptions []ReplyOption
 	for _, identity := range contact.Identities {
 		// Filter out non-dispatch channels
-		if identity.Channel == "whatsapp" || identity.Channel == "whatsapp_cloud" || identity.Channel == "telegram" {
+		if identity.Channel == "whatsapp" || identity.Channel == "whatsapp_mock" || identity.Channel == "whatsapp_cloud" || identity.Channel == "telegram" {
 			sender := defaultSenders[identity.Channel]
 			if sender != "" {
 				replyOptions = append(replyOptions, ReplyOption{
@@ -211,6 +320,8 @@ func channelLabelStr(channel string) string {
 	switch channel {
 	case "whatsapp":
 		return "WhatsApp Web"
+	case "whatsapp_mock":
+		return "WhatsApp Mock (Local)"
 	case "whatsapp_cloud":
 		return "WhatsApp Cloud"
 	case "telegram":
@@ -290,8 +401,7 @@ func (h *InboxHandler) checkBackgroundMessages(c *echo.Context, ctx context.Cont
 		isUnread, _ := h.ContactRepo.HasUnread(ctx, workspaceID, conv.ContactID)
 		if isUnread {
 			// Fire toast for this background contact
-			trigger := fmt.Sprintf(`{"showToast":{"text":"Nova mensagem de %s"}}`, jsonEscape(conv.ContactName))
-			c.Response().Header().Set("HX-Trigger", trigger)
+			setToast(c, i18n.T(ctx, "inbox.toast.new_message", conv.ContactName))
 			return
 		}
 	}
@@ -405,7 +515,7 @@ func (h *InboxHandler) NewMessageModal(c *echo.Context) error {
 		}
 	}
 
-	return mw.Render(c, http.StatusOK, components.NewChatModal(templates, fromContact, isTemplateOnly, channel, to))
+	return mw.Render(c, http.StatusOK, components.NewChatModal(templates, fromContact, isTemplateOnly, channel, to, h.WhatsAppMockEnabled))
 }
 
 // NewMessageSend enqueues template messages or initializes a new chat.
@@ -524,8 +634,16 @@ func (h *InboxHandler) NewMessageSend(c *echo.Context) error {
 		_ = h.Sessions.UpdateLastReadAt(ctx, workspaceID, to, channel, senderIdentity, time.Now().UTC())
 	}
 
-	c.Response().Header().Set("HX-Trigger", `{"showToast":{"text":"Nova mensagem/template enviada com sucesso!"}}`)
+	setToast(c, i18n.T(ctx, "inbox.toast.sent"))
 	return c.NoContent(http.StatusOK)
+}
+
+func setToast(c *echo.Context, text string) {
+	payload, err := json.Marshal(map[string]map[string]string{"showToast": {"text": text}})
+	if err != nil {
+		return
+	}
+	c.Response().Header().Set("HX-Trigger", string(payload))
 }
 
 // SearchContacts handles GET /admin/contacts/search
@@ -619,17 +737,6 @@ func escapeHTML(s string) string {
 		}
 	}
 	return string(result)
-}
-
-// jsonEscape escapes a string for safe inclusion in a JSON value (not full JSON encoder,
-// but sufficient for simple display names without newlines or unusual chars).
-func jsonEscape(s string) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return ""
-	}
-	// Marshal returns JSON with surrounding quotes; strip them
-	return string(b[1 : len(b)-1])
 }
 
 // ToggleBot handles POST /admin/contacts/:id/toggle-bot

@@ -1,6 +1,10 @@
 package components
 
-import "github.com/pablojhp.pergo/internal/repository"
+import (
+	"context"
+	"github.com/pablojhp.pergo/internal/i18n"
+	"github.com/pablojhp.pergo/internal/repository"
+)
 
 // MessageBubble renders a single message bubble.
 //   - Inbound: left-aligned white card with contact initials avatar on the left.
@@ -14,17 +18,17 @@ templ MessageBubble(m repository.ThreadMessage) {
 			</div>
 			<!-- Bubble -->
 			<div class="msg-bubble max-w-xs lg:max-w-md bg-white border border-zinc-200 rounded-2xl rounded-bl-none px-3 py-2 shadow-sm">
-				<p class="text-sm text-zinc-800 whitespace-pre-wrap break-words">{ msgBody(m.Body) }</p>
-				<p class="text-xs text-zinc-400 text-right mt-1">{ m.CreatedAt.Format("15:04") }</p>
+				<p class="text-sm text-zinc-800 whitespace-pre-wrap break-words">{ msgBody(ctx, m.Body) }</p>
+				<p class="text-xs text-zinc-400 text-right mt-1">{ i18n.FormatTime(ctx, m.CreatedAt) }</p>
 			</div>
 		</div>
 	} else {
 		<div class="msg-wrap flex items-end gap-2 justify-end" data-msg-id={ m.ID.String() }>
 			<!-- Bubble -->
 			<div class="msg-bubble max-w-xs lg:max-w-md rounded-2xl rounded-br-none px-3 py-2 shadow-sm" style="background-color:#3b82f6;">
-				<p class="text-sm text-white whitespace-pre-wrap break-words">{ msgBody(m.Body) }</p>
+				<p class="text-sm text-white whitespace-pre-wrap break-words">{ msgBody(ctx, m.Body) }</p>
 				<div class="flex items-center justify-end gap-1 mt-1">
-					<p class="text-xs text-blue-200">{ m.CreatedAt.Format("15:04") }</p>
+					<p class="text-xs text-blue-200">{ i18n.FormatTime(ctx, m.CreatedAt) }</p>
 					if m.Status != nil && *m.Status == "sent" {
 						<!-- Single checkmark -->
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-blue-200" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -48,7 +52,7 @@ templ MessageBubble(m repository.ThreadMessage) {
 						</svg>
 					} else if m.Status != nil && *m.Status == "failed" {
 						<!-- Red warning icon/text -->
-						<span class="text-xs text-red-400 font-bold" title="Falha no envio">⚠️</span>
+						<span class="text-xs text-red-400 font-bold" title={ i18n.T(ctx, "chat.failed_send") }>⚠️</span>
 					} else {
 						<!-- single checkmark/queued/sending -->
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 text-blue-300 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -62,9 +66,9 @@ templ MessageBubble(m repository.ThreadMessage) {
 }
 
 // msgBody returns the display body, replacing empty strings with a placeholder.
-func msgBody(body string) string {
+func msgBody(ctx context.Context, body string) string {
 	if body == "" {
-		return "[mídia ou mensagem especial]"
+		return i18n.T(ctx, "chat.special_message")
 	}
 	return body
 }
@@ -90,4 +94,3 @@ templ PollMessagesResponse(contactID string, afterID string, messages []reposito
 		class="hidden"
 	></div>
 }
-

@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 
+	"github.com/pablojhp.pergo/internal/i18n"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/templates/components"
 	"github.com/pablojhp.pergo/templates/layout"
@@ -16,9 +17,18 @@ type InboxMessage struct {
 	CreatedAt string
 }
 
+func hasConnectedMock(connections []*repository.Connection) bool {
+	for _, conn := range connections {
+		if conn.Channel == "whatsapp_mock" && conn.Status == "connected" {
+			return true
+		}
+	}
+	return false
+}
+
 // InboxPage renders the full split-pane inbox page with sidebar, conversation list, and chat panel.
 templ InboxPage(conversations []repository.ConversationSummary, unreadMap map[string]bool, activeChannel string, unreadCount int, chatPanel templ.Component, connections []*repository.Connection) {
-	@layout.Base("Inbox", InboxContent(conversations, unreadMap, activeChannel, unreadCount, chatPanel, connections))
+	@layout.Base(i18n.T(ctx, "inbox.title"), InboxContent(conversations, unreadMap, activeChannel, unreadCount, chatPanel, connections))
 }
 
 // InboxContent renders the split-pane layout (conversation list + chat panel).
@@ -30,19 +40,30 @@ templ InboxContent(conversations []repository.ConversationSummary, unreadMap map
 			<!-- Header -->
 			<div class="inbox-sidebar-header flex items-center justify-between px-4 py-3 border-b border-zinc-200">
 				<div class="flex items-center gap-2">
-					<h1 class="text-base font-bold text-zinc-900">Inbox</h1>
+					<h1 class="text-base font-bold text-zinc-900">{ i18n.T(ctx, "inbox.title") }</h1>
 					if unreadCount > 0 {
-						<span class="badge-unread text-xs font-bold bg-blue-500 text-white px-2 py-0.5 rounded-full">{ fmt.Sprintf("%d", unreadCount) }</span>
+						<span class="badge-unread text-xs font-bold bg-blue-500 text-white px-2 py-0.5 rounded-full">{ i18n.FormatNumber(ctx, int64(unreadCount)) }</span>
 					}
 				</div>
 				<div class="flex items-center gap-1.5">
+					if hasConnectedMock(connections) {
+						<button
+							class="px-2 py-1.5 rounded-lg border border-violet-200 bg-violet-50 hover:bg-violet-100 text-violet-700 transition-colors shadow-sm text-xs font-semibold"
+							hx-get="/admin/inbox/mock-inbound-modal"
+							hx-target="#modal-container"
+							hx-swap="innerHTML"
+							title={ i18n.T(ctx, "inbox.mock.simulate_title") }
+						>
+							{ i18n.T(ctx, "inbox.mock.simulate") }
+						</button>
+					}
 					<!-- Filter Dropdown -->
 					<div class="relative inline-block text-left" id="inbox-filter-dropdown-container">
 						<button
 							id="inbox-filter-btn"
 							class={ "p-1.5 rounded-lg border hover:bg-zinc-50 transition-colors shadow-sm flex items-center justify-center", templ.KV("border-indigo-400 bg-indigo-50 text-indigo-600 hover:text-indigo-900", activeChannel != ""), templ.KV("border-zinc-200 bg-white text-zinc-600 hover:text-zinc-900", activeChannel == "") }
 							onclick="toggleFilterDropdown()"
-							title="Filtrar por Canal"
+							title={ i18n.T(ctx, "inbox.filter.title") }
 						>
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
@@ -57,7 +78,7 @@ templ InboxContent(conversations []repository.ConversationSummary, unreadMap map
 								href="/admin/inbox"
 								class={ "block px-4 py-2 text-xs font-medium hover:bg-zinc-50 transition-colors border-b border-zinc-100", templ.KV("text-indigo-600 font-bold bg-indigo-50/50", activeChannel == ""), templ.KV("text-zinc-700", activeChannel != "") }
 							>
-								Todos os Canais
+								{ i18n.T(ctx, "inbox.all_channels") }
 							</a>
 							for _, conn := range connections {
 								<a
@@ -78,7 +99,7 @@ templ InboxContent(conversations []repository.ConversationSummary, unreadMap map
 						hx-target="#modal-container"
 						hx-swap="innerHTML"
 						onclick="setTimeout(openModal, 50)"
-						title="Novo Chat"
+						title={ i18n.T(ctx, "inbox.new_chat.title") }
 					>
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -92,7 +113,7 @@ templ InboxContent(conversations []repository.ConversationSummary, unreadMap map
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 absolute left-2.5 top-2 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
 					</svg>
-					<input type="search" placeholder="Buscar conversa…" class="w-full pl-8 pr-3 py-1.5 text-sm border border-zinc-200 rounded-md bg-zinc-50 text-zinc-700 placeholder-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 focus:border-transparent" disabled/>
+					<input type="search" placeholder={ i18n.T(ctx, "inbox.search.placeholder") } class="w-full pl-8 pr-3 py-1.5 text-sm border border-zinc-200 rounded-md bg-zinc-50 text-zinc-700 placeholder-zinc-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 focus:border-transparent" disabled/>
 				</div>
 			</div>
 			<!-- Conversation list with polling -->
@@ -109,13 +130,14 @@ templ InboxContent(conversations []repository.ConversationSummary, unreadMap map
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
 					</svg>
 					<div class="text-center">
-						<p class="font-semibold text-zinc-500">Selecione uma conversa</p>
-						<p class="text-sm mt-1">Escolha uma conversa à esquerda para visualizar o histórico.</p>
+						<p class="font-semibold text-zinc-500">{ i18n.T(ctx, "inbox.empty.title") }</p>
+						<p class="text-sm mt-1">{ i18n.T(ctx, "inbox.empty.body") }</p>
 					</div>
 				</div>
 			}
 		</div>
 	</div>
+	<div id="modal-container"></div>
 
 	<script>
 		function toggleFilterDropdown() {

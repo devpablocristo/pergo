@@ -77,7 +77,7 @@ func translateWhitespacePreserving(ctx context.Context, value string) string {
 	if trimmed == "" {
 		return value
 	}
-	translated := T(ctx, trimmed)
+	translated := T(ctx, Key(trimmed))
 	if translated == trimmed {
 		return value
 	}

@@ -7,19 +7,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 // Locale identifies a supported web-interface language.
 type Locale string
+
+// Key is a stable, semantic identifier for a UI string. Keys are internal to
+// the web interface; API payloads and persisted values never use them.
+type Key string
 
 const (
 	Spanish             Locale = "es"
 	English             Locale = "en"
 	BrazilianPortuguese Locale = "pt-BR"
 	CookieName                 = "pergo-locale"
+
+	CommonCancel Key = "common.cancel"
+	CommonClose  Key = "common.close"
+	CommonSave   Key = "common.save"
+	CommonSend   Key = "common.send"
+	Language     Key = "common.language"
 )
 
 type contextKey struct{}
@@ -32,6 +45,8 @@ var matcher = language.NewMatcher([]language.Tag{
 	language.BrazilianPortuguese,
 })
 
+var placeholderPattern = regexp.MustCompile(`%((\[[0-9]+\])?[-+#0 ]*[0-9]*(\.[0-9]+)?[vTtbcdoOqxXUeEfFgGsp])`)
+
 //go:embed locales/es.json
 var spanishCatalogJSON []byte
 
@@ -41,7 +56,7 @@ var englishCatalogJSON []byte
 //go:embed locales/pt-BR.json
 var portugueseCatalogJSON []byte
 
-var catalogs = map[Locale]map[string]string{
+var catalogs = map[Locale]map[Key]string{
 	Spanish:             mustLoadCatalog(Spanish, spanishCatalogJSON),
 	English:             mustLoadCatalog(English, englishCatalogJSON),
 	BrazilianPortuguese: mustLoadCatalog(BrazilianPortuguese, portugueseCatalogJSON),
@@ -53,8 +68,8 @@ func init() {
 	}
 }
 
-func mustLoadCatalog(locale Locale, raw []byte) map[string]string {
-	var catalog map[string]string
+func mustLoadCatalog(locale Locale, raw []byte) map[Key]string {
+	var catalog map[Key]string
 	if err := json.Unmarshal(raw, &catalog); err != nil {
 		panic(fmt.Sprintf("decode %s catalog: %v", locale, err))
 	}
@@ -69,22 +84,32 @@ func validateCatalogs() error {
 			return fmt.Errorf("catalog %s has %d keys, expected %d", locale, len(catalog), len(base))
 		}
 		for key := range base {
-			if strings.TrimSpace(catalog[key]) == "" {
+			value := catalog[key]
+			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("catalog %s has empty value for %q", locale, key)
+			}
+			if signature(value) != signature(base[key]) {
+				return fmt.Errorf("catalog %s has incompatible placeholders for %q", locale, key)
 			}
 		}
 	}
 	return nil
 }
 
-// Parse validates a locale value received from a cookie or form.
+func signature(value string) string {
+	matches := placeholderPattern.FindAllString(value, -1)
+	return strings.Join(matches, "|")
+}
+
+// Parse validates canonical locale values received from cookies and forms.
+// Browser language variants are handled exclusively by Resolve's matcher.
 func Parse(value string) (Locale, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "es", "es-es", "es-419":
+	switch strings.TrimSpace(value) {
+	case "es":
 		return Spanish, true
-	case "en", "en-us", "en-gb":
+	case "en":
 		return English, true
-	case "pt", "pt-br", "pt_br":
+	case "pt-BR":
 		return BrazilianPortuguese, true
 	default:
 		return "", false
@@ -138,17 +163,73 @@ func HTMLLang(ctx context.Context) string {
 
 // T translates key for the current locale. Missing keys fall back to Spanish
 // and finally to the key itself, which keeps an incomplete catalog readable.
-func T(ctx context.Context, key string, args ...any) string {
+func T(ctx context.Context, key Key, args ...any) string {
 	locale := LocaleFromContext(ctx)
 	value := catalogs[locale][key]
 	if value == "" {
 		value = catalogs[Spanish][key]
 	}
 	if value == "" {
-		value = key
+		value = string(key)
 	}
 	if len(args) == 0 {
 		return value
 	}
 	return fmt.Sprintf(value, args...)
+}
+
+// FormatDate renders a date using the selected interface convention.
+func FormatDate(ctx context.Context, value time.Time) string {
+	if LocaleFromContext(ctx) == English {
+		return value.Format("01/02/2006")
+	}
+	return value.Format("02/01/2006")
+}
+
+// FormatDateTime renders a date-time without seconds using the selected locale.
+func FormatDateTime(ctx context.Context, value time.Time) string {
+	if LocaleFromContext(ctx) == English {
+		return value.Format("01/02/2006 3:04 PM")
+	}
+	return value.Format("02/01/2006 15:04")
+}
+
+// FormatDateTimeSeconds renders a date-time with seconds using the selected locale.
+func FormatDateTimeSeconds(ctx context.Context, value time.Time) string {
+	if LocaleFromContext(ctx) == English {
+		return value.Format("01/02/2006 3:04:05 PM")
+	}
+	return value.Format("02/01/2006 15:04:05")
+}
+
+// FormatTime renders a clock value using the selected locale.
+func FormatTime(ctx context.Context, value time.Time) string {
+	if LocaleFromContext(ctx) == English {
+		return value.Format("3:04 PM")
+	}
+	return value.Format("15:04")
+}
+
+// FormatNumber localizes integer grouping without changing the value itself.
+func FormatNumber(ctx context.Context, value int64) string {
+	var tag language.Tag
+	switch LocaleFromContext(ctx) {
+	case English:
+		tag = language.English
+	case BrazilianPortuguese:
+		tag = language.BrazilianPortuguese
+	default:
+		tag = language.Spanish
+	}
+	return message.NewPrinter(tag).Sprintf("%d", value)
+}
+
+// Plural selects the singular or plural semantic key. The three supported
+// locales use the same one/other cardinal split for the UI counts we expose.
+func Plural(ctx context.Context, count int64, one, other Key, args ...any) string {
+	key := other
+	if count == 1 {
+		key = one
+	}
+	return T(ctx, key, args...)
 }

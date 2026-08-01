@@ -546,14 +546,16 @@ func main() {
 
 	// Inbox routes
 	inboxHandler := &admin.InboxHandler{
-		Repo:           auditRepo,
-		Sessions:       recipientSessionRepo,
-		Workspaces:     wsRepo,
-		Connections:    connectionRepo,
-		Publisher:      publisher,
-		Templates:      wabaTemplateRepo,
-		ContactRepo:    contactRepo,
-		UserActionLogs: userActionLogRepo,
+		Repo:                auditRepo,
+		Sessions:            recipientSessionRepo,
+		Workspaces:          wsRepo,
+		Connections:         connectionRepo,
+		Publisher:           publisher,
+		Templates:           wabaTemplateRepo,
+		ContactRepo:         contactRepo,
+		UserActionLogs:      userActionLogRepo,
+		InboundProcessor:    inboundProcessor,
+		WhatsAppMockEnabled: cfg.WhatsAppMockEnabled,
 	}
 	adminGroup.GET("/inbox", inboxHandler.View)
 	adminGroup.GET("/inbox/conversations/poll", inboxHandler.PollConversations)
@@ -562,6 +564,8 @@ func main() {
 	adminGroup.POST("/inbox/send", inboxHandler.SendMessage)
 	adminGroup.GET("/inbox/new-message-modal", inboxHandler.NewMessageModal)
 	adminGroup.POST("/inbox/new-message-send", inboxHandler.NewMessageSend)
+	adminGroup.GET("/inbox/mock-inbound-modal", inboxHandler.MockInboundModal)
+	adminGroup.POST("/inbox/mock-inbound", inboxHandler.SimulateMockInbound)
 	adminGroup.GET("/contacts/search", inboxHandler.SearchContacts)
 	adminGroup.POST("/contacts/merge", inboxHandler.MergeContacts)
 	adminGroup.POST("/contacts/:id/toggle-bot", inboxHandler.ToggleBot)

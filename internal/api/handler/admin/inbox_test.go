@@ -19,12 +19,64 @@ import (
 
 	"github.com/pablojhp.pergo/internal/api/handler/admin"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/inbound"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	"github.com/pablojhp.pergo/internal/platform/queue"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type fakeInboxConnectionStore struct {
+	connections []*repository.Connection
+}
+
+func (s *fakeInboxConnectionStore) ListByWorkspace(_ context.Context, workspaceID uuid.UUID) ([]*repository.Connection, error) {
+	var result []*repository.Connection
+	for _, conn := range s.connections {
+		if conn.WorkspaceID == workspaceID {
+			result = append(result, conn)
+		}
+	}
+	return result, nil
+}
+
+func (s *fakeInboxConnectionStore) GetByID(_ context.Context, id uuid.UUID) (*repository.Connection, error) {
+	for _, conn := range s.connections {
+		if conn.ID == id {
+			return conn, nil
+		}
+	}
+	return nil, repository.ErrConnectionNotFound
+}
+
+func (s *fakeInboxConnectionStore) GetBySenderIdentity(_ context.Context, workspaceID uuid.UUID, senderIdentity string) (*repository.Connection, error) {
+	for _, conn := range s.connections {
+		if conn.WorkspaceID == workspaceID && conn.SenderIdentity == senderIdentity {
+			return conn, nil
+		}
+	}
+	return nil, repository.ErrConnectionNotFound
+}
+
+func (s *fakeInboxConnectionStore) GetDefaultChannelConnection(_ context.Context, workspaceID uuid.UUID, channel string) (*repository.Connection, error) {
+	for _, conn := range s.connections {
+		if conn.WorkspaceID == workspaceID && conn.Channel == channel && conn.IsDefault {
+			return conn, nil
+		}
+	}
+	return nil, repository.ErrConnectionNotFound
+}
+
+type recordingInboundProcessor struct {
+	event *inbound.InboundEvent
+	err   error
+}
+
+func (p *recordingInboundProcessor) Process(_ context.Context, event *inbound.InboundEvent) error {
+	p.event = event
+	return p.err
+}
 
 func newEchoContext(method, path string, body string, contentType string) (*echo.Echo, *echo.Context, *httptest.ResponseRecorder) {
 	e := echo.New()
@@ -44,6 +96,115 @@ func newEchoContext(method, path string, body string, contentType string) (*echo
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+func TestInboxHandler_SimulateMockInbound(t *testing.T) {
+	workspaceID := uuid.New()
+	connectionID := uuid.New()
+	connection := &repository.Connection{
+		ID:             connectionID,
+		WorkspaceID:    workspaceID,
+		Name:           "Local Mock",
+		Channel:        "whatsapp_mock",
+		SenderIdentity: "whatsapp-mock:" + connectionID.String(),
+		Status:         "connected",
+		IsDefault:      true,
+	}
+	processor := &recordingInboundProcessor{}
+	h := &admin.InboxHandler{
+		Connections:         &fakeInboxConnectionStore{connections: []*repository.Connection{connection}},
+		InboundProcessor:    processor,
+		WhatsAppMockEnabled: true,
+	}
+
+	form := url.Values{
+		"connection_id": {connectionID.String()},
+		"from":          {"cliente-demo-1"},
+		"name":          {"Cliente Demo"},
+		"body":          {"Hola desde el mock"},
+	}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/admin/inbox/mock-inbound", strings.NewReader(form.Encode()))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+	req.AddCookie(&http.Cookie{Name: "pergo-active-workspace", Value: workspaceID.String()})
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := h.SimulateMockInbound(c); err != nil {
+		t.Fatalf("SimulateMockInbound returned error: %v", err)
+	}
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if got := rec.Header().Get("HX-Redirect"); got != "/admin/inbox?connection="+connection.SenderIdentity {
+		t.Fatalf("HX-Redirect = %q", got)
+	}
+	if processor.event == nil {
+		t.Fatal("inbound processor was not called")
+	}
+	if processor.event.WorkspaceID != workspaceID ||
+		processor.event.ConnectionID != connectionID ||
+		processor.event.Channel != "whatsapp_mock" ||
+		processor.event.From != "cliente-demo-1" ||
+		processor.event.To != connection.SenderIdentity ||
+		processor.event.SenderName != "Cliente Demo" ||
+		processor.event.Body != "Hola desde el mock" {
+		t.Fatalf("unexpected inbound event: %+v", processor.event)
+	}
+	if !strings.HasPrefix(processor.event.MessageID, "whatsapp-mock-inbound-") {
+		t.Fatalf("unexpected MessageID %q", processor.event.MessageID)
+	}
+}
+
+func TestInboxHandler_SimulateMockInboundIsDisabledByDefault(t *testing.T) {
+	h := &admin.InboxHandler{}
+	_, c, rec := newEchoContext(http.MethodPost, "/admin/inbox/mock-inbound", "", echo.MIMEApplicationForm)
+
+	if err := h.SimulateMockInbound(c); err != nil {
+		t.Fatalf("SimulateMockInbound returned error: %v", err)
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestInboxHandler_SimulateMockInboundRejectsAnotherWorkspace(t *testing.T) {
+	activeWorkspaceID := uuid.New()
+	connection := &repository.Connection{
+		ID:             uuid.New(),
+		WorkspaceID:    uuid.New(),
+		Channel:        "whatsapp_mock",
+		SenderIdentity: "whatsapp-mock:foreign",
+		Status:         "connected",
+	}
+	processor := &recordingInboundProcessor{}
+	h := &admin.InboxHandler{
+		Connections:         &fakeInboxConnectionStore{connections: []*repository.Connection{connection}},
+		InboundProcessor:    processor,
+		WhatsAppMockEnabled: true,
+	}
+
+	form := url.Values{
+		"connection_id": {connection.ID.String()},
+		"from":          {"cliente-demo-1"},
+		"body":          {"mensaje"},
+	}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/admin/inbox/mock-inbound", strings.NewReader(form.Encode()))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+	req.AddCookie(&http.Cookie{Name: "pergo-active-workspace", Value: activeWorkspaceID.String()})
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if err := h.SimulateMockInbound(c); err != nil {
+		t.Fatalf("SimulateMockInbound returned error: %v", err)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if processor.event != nil {
+		t.Fatal("inbound processor must not be called for another workspace")
+	}
+}
 
 // TestInboxHandler_SendMessage_EmptyBody verifies HTTP 400 when body is empty.
 func TestInboxHandler_SendMessage_EmptyBody(t *testing.T) {
@@ -677,8 +838,16 @@ func TestInboxHandler_NewMessageSend_HTTP(t *testing.T) {
 
 	// Verify HX-Trigger header is set
 	triggerHeader := rec.Header().Get("HX-Trigger")
-	if !strings.Contains(triggerHeader, "Nova mensagem/template enviada com sucesso!") {
-		t.Errorf("expected HX-Trigger header to contain success message, got %q", triggerHeader)
+	var trigger struct {
+		ShowToast struct {
+			Text string `json:"text"`
+		} `json:"showToast"`
+	}
+	if err := json.Unmarshal([]byte(triggerHeader), &trigger); err != nil {
+		t.Fatalf("decode HX-Trigger: %v; value=%q", err, triggerHeader)
+	}
+	if trigger.ShowToast.Text != "El mensaje o plantilla se envió correctamente." {
+		t.Errorf("unexpected localized toast: %q", trigger.ShowToast.Text)
 	}
 
 	// Verify session was upserted
@@ -858,8 +1027,8 @@ func TestInboxHandler_ToggleBot_HTTP(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "Bot Pausado") {
-		t.Errorf("expected HTML response to contain 'Bot Pausado', got: %s", body)
+	if !strings.Contains(body, "Pausado") {
+		t.Errorf("expected localized HTML response to contain 'Pausado', got: %s", body)
 	}
 
 	// Check DB state
@@ -893,8 +1062,8 @@ func TestInboxHandler_ToggleBot_HTTP(t *testing.T) {
 	}
 
 	body2 := rec2.Body.String()
-	if !strings.Contains(body2, "Bot Ativo") {
-		t.Errorf("expected HTML response to contain 'Bot Ativo', got: %s", body2)
+	if !strings.Contains(body2, "Activo") {
+		t.Errorf("expected localized HTML response to contain 'Activo', got: %s", body2)
 	}
 
 	// Check DB state again

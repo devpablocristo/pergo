@@ -1,9 +1,11 @@
 package components
 
 import (
+	"context"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/i18n"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -15,14 +17,16 @@ type ReplyOption struct {
 }
 
 // channelLabelStr returns a human-readable display name for a channel (plain string, for use in Go expressions).
-func channelLabelStr(channel string) string {
+func channelLabelStr(ctx context.Context, channel string) string {
 	switch channel {
 	case "whatsapp":
-		return "WhatsApp Web"
+		return i18n.T(ctx, "channel.whatsapp_web")
+	case "whatsapp_mock":
+		return i18n.T(ctx, "channel.whatsapp_mock")
 	case "whatsapp_cloud":
-		return "WhatsApp Cloud"
+		return i18n.T(ctx, "channel.whatsapp_cloud")
 	case "telegram":
-		return "Telegram"
+		return i18n.T(ctx, "channel.telegram")
 	default:
 		return channel
 	}
@@ -67,7 +71,7 @@ templ ChatPanel(contact *domain.Contact, replyOptions []ReplyOption, messages []
 						if i > 0 {
 							<span class="text-zinc-300 text-[10px]">|</span>
 						}
-						<span class="text-[10px] text-zinc-400">{ channelLabelStr(identity.Channel) }: { identity.SenderIdentity }</span>
+						<span class="text-[10px] text-zinc-400">{ channelLabelStr(ctx, identity.Channel) }: { identity.SenderIdentity }</span>
 					}
 				</div>
 			</div>
@@ -79,18 +83,18 @@ templ ChatPanel(contact *domain.Contact, replyOptions []ReplyOption, messages []
 					class="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-zinc-200 text-xs font-semibold rounded-md text-zinc-700 bg-white hover:bg-zinc-50 shadow-sm transition-colors"
 					onclick="document.getElementById('merge-menu').classList.toggle('hidden')"
 				>
-					Mesclar Contato
+					{ i18n.T(ctx, "chat.merge") }
 				</button>
 
 				<div 
 					id="merge-menu" 
 					class="hidden origin-top-right absolute right-0 mt-2 w-72 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-50 p-3 border border-zinc-150"
 				>
-					<p class="text-xs font-semibold text-zinc-500 mb-2">Mesclar com outro contato:</p>
+					<p class="text-xs font-semibold text-zinc-500 mb-2">{ i18n.T(ctx, "chat.merge_with") }</p>
 					<input 
 						type="text" 
 						name="q" 
-						placeholder="Buscar por nome ou telefone..." 
+						placeholder={ i18n.T(ctx, "chat.search_contact") }
 						class="w-full px-2 py-1.5 text-xs border border-zinc-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500"
 						hx-get={ fmt.Sprintf("/admin/contacts/search?exclude_id=%s", contact.ID.String()) }
 						hx-trigger="keyup changed delay:300ms"
@@ -106,7 +110,7 @@ templ ChatPanel(contact *domain.Contact, replyOptions []ReplyOption, messages []
 		<!-- WABA 24h Block Warning Banner -->
 		if isWabaBlocked {
 			<div class="px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-1.5 flex-shrink-0">
-				<span>⚠️ Janela de atendimento (24h) fechada para este contato. Somente envios de Templates Meta são autorizados.</span>
+				<span>⚠️ { i18n.T(ctx, "chat.waba_window") }</span>
 			</div>
 		}
 
@@ -116,7 +120,7 @@ templ ChatPanel(contact *domain.Contact, replyOptions []ReplyOption, messages []
 			class="chat-messages flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2 bg-zinc-50"
 		>
 			if len(messages) == 0 {
-				<div class="text-center text-zinc-400 text-sm py-8 select-none">Nenhuma mensagem encontrada.</div>
+				<div class="text-center text-zinc-400 text-sm py-8 select-none">{ i18n.T(ctx, "chat.empty") }</div>
 			}
 			for _, m := range messages {
 				@MessageBubble(m)
@@ -177,7 +181,7 @@ templ replyFormFields(replyOptions []ReplyOption) {
 	<div class="flex flex-col gap-2 w-full">
 		if len(replyOptions) > 1 {
 			<div class="flex items-center gap-2 mb-1">
-				<span class="text-xs text-zinc-400 font-medium">Responder via:</span>
+				<span class="text-xs text-zinc-400 font-medium">{ i18n.T(ctx, "chat.reply_via") }</span>
 				<select 
 					id="chat-reply-picker"
 					class="text-xs border border-zinc-200 rounded px-2 py-1 bg-white text-zinc-700 focus:outline-none focus:ring-1 focus:ring-indigo-400 focus:border-transparent cursor-pointer"
@@ -196,11 +200,11 @@ templ replyFormFields(replyOptions []ReplyOption) {
 			</div>
 		} else if len(replyOptions) == 1 {
 			<div class="text-[11px] text-zinc-400 font-medium mb-1">
-				Respondendo via { channelLabelStr(replyOptions[0].Channel) } ({ replyOptions[0].RecipientPhone })
+				{ i18n.T(ctx, "chat.reply_via") } { channelLabelStr(ctx, replyOptions[0].Channel) } ({ replyOptions[0].RecipientPhone })
 			</div>
 		} else {
 			<div class="text-[11px] text-red-500 font-medium mb-1">
-				Nenhum canal ativo disponível para resposta.
+				{ i18n.T(ctx, "chat.no_channel") }
 			</div>
 		}
 
@@ -220,14 +224,14 @@ templ replyFormFields(replyOptions []ReplyOption) {
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
 						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
 					</svg>
-					<span>Templates</span>
+					<span>{ i18n.T(ctx, "chat.templates") }</span>
 				</button>
 			}
 
 			<textarea
 				id="chat-textarea"
 				name="body"
-				placeholder="Digite uma mensagem… (Enter para enviar)"
+				placeholder={ i18n.T(ctx, "chat.message_placeholder") }
 				rows="1"
 				class="flex-1 resize-none rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-800 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent transition-shadow overflow-hidden disabled:opacity-50"
 				style="min-height:40px;max-height:160px;"
@@ -240,7 +244,7 @@ templ replyFormFields(replyOptions []ReplyOption) {
 			<button
 				type="submit"
 				class="flex-shrink-0 h-10 w-10 rounded-full bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 flex items-center justify-center text-white transition-colors shadow-sm disabled:opacity-50"
-				aria-label="Enviar"
+				aria-label={ i18n.T(ctx, "chat.send_aria") }
 				if len(replyOptions) == 0 {
 					disabled
 				}
@@ -282,7 +286,7 @@ templ ContactSearchResults(results []domain.Contact, primaryID uuid.UUID) {
 		<div 
 			class="p-2 hover:bg-zinc-50 rounded cursor-pointer text-xs flex justify-between items-center border-b border-zinc-100 last:border-b-0"
 			hx-post={ fmt.Sprintf("/admin/contacts/merge?primary_id=%s&secondary_id=%s", primaryID.String(), c.ID.String()) }
-			hx-confirm={ fmt.Sprintf("Tem certeza que deseja mesclar %s com este contato? Todo o histórico de conversas será unificado.", c.Name) }
+			hx-confirm={ i18n.T(ctx, "chat.merge_confirm", c.Name) }
 			hx-target="body"
 		>
 			<div>
@@ -297,7 +301,7 @@ templ ContactSearchResults(results []domain.Contact, primaryID uuid.UUID) {
 		</div>
 	}
 	if len(results) == 0 {
-		<p class="text-xs text-zinc-400 text-center py-2">Nenhum contato encontrado.</p>
+		<p class="text-xs text-zinc-400 text-center py-2">{ i18n.T(ctx, "chat.no_contact") }</p>
 	}
 }
 
@@ -312,10 +316,10 @@ templ BotStatusBadge(contact *domain.Contact) {
 	>
 		if contact.BotActive {
 			<span class="h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1" aria-hidden="true"></span>
-			Bot Ativo
+			{ i18n.T(ctx, "status.active") }
 		} else {
 			<span class="h-1.5 w-1.5 rounded-full bg-zinc-400 mr-1" aria-hidden="true"></span>
-			Bot Pausado
+			{ i18n.T(ctx, "status.paused") }
 		}
 	</button>
 }

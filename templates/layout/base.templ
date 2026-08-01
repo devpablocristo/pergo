@@ -11,7 +11,7 @@ templ Base(title string, content templ.Component) {
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-			<title>{ title } - PerGo Admin</title>
+			<title>{ i18n.T(ctx, i18n.Key(title)) } - PerGo Admin</title>
 			<link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css"/>
 			<script src="https://cdn.tailwindcss.com"></script>
 			<link rel="stylesheet" href="/static/css/admin.css"/>
@@ -38,7 +38,7 @@ templ LoginBase(title string, content templ.Component) {
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-			<title>{ title } - PerGo Admin</title>
+			<title>{ i18n.T(ctx, i18n.Key(title)) } - PerGo Admin</title>
 			<link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css"/>
 			<script src="https://cdn.tailwindcss.com"></script>
 			<link rel="stylesheet" href="/static/css/admin.css"/>

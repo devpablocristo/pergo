@@ -11,7 +11,7 @@ templ Landing() {
 		<head>
 			<meta charset="UTF-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-			<title>PerGo - Omnichannel CPaaS</title>
+			<title>PerGo - { i18n.T(ctx, "landing.cpaas") }</title>
 			<link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css"/>
 			<script src="https://cdn.tailwindcss.com"></script>
 			<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet"/>
@@ -51,7 +51,7 @@ templ Landing() {
 					<nav class="flex items-center gap-6">
 						@components.LanguageSelector()
 						<a href="https://github.com/pablodiegoo/OmniGo" target="_blank" rel="noopener noreferrer" class="text-xs font-semibold text-slate-400 hover:text-indigo-400 transition">GitHub</a>
-						<a href="/admin/login" class="btn btn-sm btn-indigo bg-indigo-600 hover:bg-indigo-500 text-white border-none rounded-lg px-4 text-xs font-bold transition-all shadow-lg shadow-indigo-600/20">Ir para o Console</a>
+						<a href="/admin/login" class="btn btn-sm btn-indigo bg-indigo-600 hover:bg-indigo-500 text-white border-none rounded-lg px-4 text-xs font-bold transition-all shadow-lg shadow-indigo-600/20">{ i18n.T(ctx, "landing.console") }</a>
 					</nav>
 				</div>
 			</header>
@@ -60,18 +60,18 @@ templ Landing() {
 			<section class="max-w-7xl mx-auto px-6 pt-20 pb-16 text-center relative z-10">
 				<div class="max-w-3xl mx-auto space-y-6">
 					<h1 class="text-4xl sm:text-6xl font-extrabold tracking-tight leading-none">
-						Comunicações Multicanal <br/>
-						<span class="gradient-text">Sem Custos Abusivos</span>
+						{ i18n.T(ctx, "landing.hero.title") } <br/>
+						<span class="gradient-text">{ i18n.T(ctx, "landing.hero.highlight") }</span>
 					</h1>
 					<p class="text-base sm:text-lg text-slate-400 font-medium leading-relaxed max-w-2xl mx-auto">
-						Uma única API REST integrada no seu backend para gerenciar conexões de WhatsApp Web, WhatsApp Cloud (WABA) e Telegram com fila resiliente NATS JetStream e soberania total dos seus dados.
+						{ i18n.T(ctx, "landing.hero.description") }
 					</p>
 					<div class="flex flex-wrap items-center justify-center gap-4 pt-4">
 						<a href="/admin/" class="btn btn-md bg-indigo-600 hover:bg-indigo-500 text-white border-none rounded-xl px-6 font-bold shadow-lg shadow-indigo-600/30 transition-all hover:-translate-y-0.5">
-							Acessar Painel Admin
+							{ i18n.T(ctx, "landing.open_admin") }
 						</a>
 						<a href="https://github.com/pablodiegoo/OmniGo" target="_blank" rel="noopener noreferrer" class="btn btn-md btn-outline border-slate-800 hover:bg-slate-900 text-slate-300 rounded-xl px-6 font-bold transition-all hover:-translate-y-0.5">
-							Ver Repositório GitHub
+							{ i18n.T(ctx, "landing.github") }
 						</a>
 					</div>
 				</div>
@@ -82,22 +82,22 @@ templ Landing() {
 				<div class="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
 					<!-- Explanation -->
 					<div class="space-y-6">
-						<h2 class="text-2xl sm:text-3xl font-extrabold tracking-tight">Uma única requisição para qualquer canal</h2>
+						<h2 class="text-2xl sm:text-3xl font-extrabold tracking-tight">{ i18n.T(ctx, "landing.integration.title") }</h2>
 						<p class="text-sm sm:text-base text-slate-400 leading-relaxed">
-							Abstraia a fragmentação dos provedores. Faça um único POST para a rota de mensagens e o PerGo cuidará do roteamento, throttling de entrega, throttling antispam do WhatsApp Web (atrasos aleatórios de 1-3s) e fallback para canais secundários se o principal falhar.
+							{ i18n.T(ctx, "landing.integration.description") }
 						</p>
 						<div class="space-y-3 text-xs sm:text-sm">
 							<div class="flex items-start gap-3">
 								<span class="w-5 h-5 rounded-full bg-indigo-950 flex items-center justify-center text-indigo-400 font-bold text-xs">✓</span>
-								<span><strong>Fallback automático:</strong> Envia por Telegram se o WhatsApp falhar.</span>
+								<span>{ i18n.T(ctx, "landing.feature.fallback") }</span>
 							</div>
 							<div class="flex items-start gap-3">
 								<span class="w-5 h-5 rounded-full bg-indigo-950 flex items-center justify-center text-indigo-400 font-bold text-xs">✓</span>
-								<span><strong>Segurança:</strong> Criptografia AES-256-GCM para credenciais de canais.</span>
+								<span>{ i18n.T(ctx, "landing.feature.security") }</span>
 							</div>
 							<div class="flex items-start gap-3">
 								<span class="w-5 h-5 rounded-full bg-indigo-950 flex items-center justify-center text-indigo-400 font-bold text-xs">✓</span>
-								<span><strong>Alta Performance:</strong> Ingestion em &lt;50ms com broker NATS.</span>
+								<span>{ i18n.T(ctx, "landing.feature.performance") }</span>
 							</div>
 						</div>
 					</div>
@@ -129,29 +129,29 @@ templ Landing() {
 
 			<!-- Features Grid -->
 			<section class="max-w-7xl mx-auto px-6 py-16 border-t border-slate-900/60 relative z-10">
-				<h3 class="text-center text-xs font-bold uppercase tracking-wider text-indigo-400 mb-12">Recursos da Plataforma</h3>
+				<h3 class="text-center text-xs font-bold uppercase tracking-wider text-indigo-400 mb-12">{ i18n.T(ctx, "landing.features") }</h3>
 				<div class="grid grid-cols-1 md:grid-cols-3 gap-8">
 					<div class="bg-slate-900/30 border border-slate-900 p-6 rounded-xl space-y-3 hover:border-slate-800 transition">
 						<div class="w-10 h-10 rounded-lg bg-indigo-950/50 flex items-center justify-center text-xl text-indigo-400 font-bold">💬</div>
 						<h4 class="font-bold text-base">WhatsApp Web (whatsmeow)</h4>
-						<p class="text-xs text-slate-400 leading-relaxed">Conecte via QR Code utilizando sessões locais seguras e simulação de comportamento humano para evitar banimentos.</p>
+						<p class="text-xs text-slate-400 leading-relaxed">{ i18n.T(ctx, "landing.whatsapp_web") }</p>
 					</div>
 					<div class="bg-slate-900/30 border border-slate-900 p-6 rounded-xl space-y-3 hover:border-slate-800 transition">
 						<div class="w-10 h-10 rounded-lg bg-indigo-950/50 flex items-center justify-center text-xl text-indigo-400 font-bold">☁️</div>
 						<h4 class="font-bold text-base">WhatsApp Cloud (WABA)</h4>
-						<p class="text-xs text-slate-400 leading-relaxed">Integração oficial robusta e em conformidade com as políticas da Meta para grandes volumes de campanhas.</p>
+						<p class="text-xs text-slate-400 leading-relaxed">{ i18n.T(ctx, "landing.cloud") }</p>
 					</div>
 					<div class="bg-slate-900/30 border border-slate-900 p-6 rounded-xl space-y-3 hover:border-slate-800 transition">
 						<div class="w-10 h-10 rounded-lg bg-indigo-950/50 flex items-center justify-center text-xl text-indigo-400 font-bold">🤖</div>
 						<h4 class="font-bold text-base">Telegram Bots</h4>
-						<p class="text-xs text-slate-400 leading-relaxed">Roteamento completo de bots com suporte a chat IDs numéricos e persistência automática de contatos.</p>
+						<p class="text-xs text-slate-400 leading-relaxed">{ i18n.T(ctx, "landing.telegram") }</p>
 					</div>
 				</div>
 			</section>
 
 			<!-- Footer -->
 			<footer class="border-t border-slate-900 py-8 text-center text-xs text-slate-500 relative z-10">
-				<p>&copy; 2026 PerGo. Licenciado sob MIT. Projeto Open Source.</p>
+				<p>{ i18n.T(ctx, "landing.footer") }</p>
 			</footer>
 		</body>
 	</html>

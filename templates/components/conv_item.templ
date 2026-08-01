@@ -2,6 +2,7 @@ package components
 
 import (
 	"fmt"
+	"github.com/pablojhp.pergo/internal/i18n"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -66,7 +67,7 @@ templ ConvItem(conv repository.ConversationSummary, unread bool) {
 		<div class="conv-body flex-1 min-w-0">
 			<div class="flex items-center justify-between gap-1 mb-0.5">
 				<span class="conv-from font-semibold text-sm text-zinc-900 truncate">{ conv.ContactName }</span>
-				<span class="conv-time text-xs text-zinc-400 flex-shrink-0">{ conv.LastMessageTime.Format("15:04") }</span>
+				<span class="conv-time text-xs text-zinc-400 flex-shrink-0">{ i18n.FormatTime(ctx, conv.LastMessageTime) }</span>
 			</div>
 			<div class="flex items-center justify-between gap-1">
 				<span class="conv-preview text-xs text-zinc-500 truncate">{ truncate(conv.LastMessageBody, 48) }</span>
@@ -82,7 +83,7 @@ templ ConvItem(conv repository.ConversationSummary, unread bool) {
 				</div>
 			</div>
 			<!-- Via (recipient identity) -->
-			<div class="conv-via text-xs text-zinc-400 truncate mt-0.5">via { conv.RecipientIdentity }</div>
+			<div class="conv-via text-xs text-zinc-400 truncate mt-0.5">{ i18n.T(ctx, "inbox.via") } { conv.RecipientIdentity }</div>
 		</div>
 	</div>
 }

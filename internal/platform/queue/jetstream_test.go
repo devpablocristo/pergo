@@ -48,6 +48,13 @@ func TestEnsureStream(t *testing.T) {
 	if info.Config.Discard != jetstream.DiscardNew {
 		t.Errorf("Discard = %v, want DiscardNew", info.Config.Discard)
 	}
+	if info.Config.Duplicates != MessageDuplicateWindow {
+		t.Errorf(
+			"Duplicates = %v, want %v",
+			info.Config.Duplicates,
+			MessageDuplicateWindow,
+		)
+	}
 }
 
 func TestEnsureStreamIdempotent(t *testing.T) {

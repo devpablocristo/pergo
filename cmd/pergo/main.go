@@ -347,6 +347,7 @@ func main() {
 
 	// --- Repositories ---
 	apiKeyRepo := repository.NewAPIKeyRepository(pool)
+	messageIdempotencyRepo := repository.NewMessageIdempotencyRepository(pool)
 	wabaTemplateRepo := repository.NewWABATemplateRepository(pool)
 
 	wabaTemplateHandler := admin.NewWABATemplateHandler(wabaTemplateRepo, connectionRepo)
@@ -382,7 +383,8 @@ func main() {
 	// --- Message handler (POST /messages) ---
 	outboundProcessor := outbound.NewProcessor(queueDepth, mediaEngine, connectionRepo, publisher)
 	messageHandler := &handler.MessageHandler{
-		Ingestor: outboundProcessor,
+		Ingestor:    outboundProcessor,
+		Idempotency: messageIdempotencyRepo,
 	}
 	messageHandler.RegisterRoutes(e, middleware.RateLimiterMiddleware(rateLimiter))
 

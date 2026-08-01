@@ -22,9 +22,10 @@ Envia uma mensagem (texto, mídia ou template) para um canal específico (Telegr
 
 * **Endpoint:** `POST /api/v1/messages`
 * **Content-Type:** `application/json`
-* **Idempotency-Key:** chave opaca de 1 a 255 caracteres. É opcional para
-  clientes legados e obrigatória para integrações que precisam de recuperação
-  segura após timeout.
+* **Idempotency-Key:** chave opaca de 1 a 255 caracteres, iniciada por letra ou
+  número e restrita a letras, números, `.`, `_`, `:`, `/` e `-`. É opcional
+  para clientes legados e obrigatória para integrações que precisam de
+  recuperação segura após timeout.
 * **Respostas:**
   * `202 Accepted` — Mensagem recebida com sucesso e enfileirada para envio durável.
   * `400 Bad Request` — Payload inválido ou malformado.
@@ -48,6 +49,9 @@ do receipt, a lease expira e a requisição pode ser retomada. O publish conserv
 o mesmo `X-Trace-ID`, e o stream mantém uma janela de deduplicação de 24 horas.
 Isso evita duplicação na ingestão e no retry HTTP; não transforma APIs externas
 de WhatsApp em exactly-once diante de uma queda depois que o provedor enviou.
+O ledger é conservado durante toda a vida do Workspace e removido por cascade
+somente quando o Workspace é excluído; não há expiração silenciosa que permita
+reutilizar uma chave antiga.
 
 ### Payload Padrão (Mensagem de Texto)
 

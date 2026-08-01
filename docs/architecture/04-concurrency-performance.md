@@ -4,7 +4,9 @@
 
 - 500 req/s sustained, ingest p99 <= 50ms, <512MB RAM, 2 vCPU.
 - Per-request hot path: TLS terminate → JSON decode → API-key auth
-  (cached) → validate → JetStream publish → `202`. **Two I/O ops max.**
+  → short ingress claim transaction → JetStream publish → fenced PostgreSQL
+  completion → `202`. The durability contract intentionally adds the ledger
+  round-trips; no database transaction is held across the broker call.
 - Workers: 1–3s staggered send per WhatsApp Web session → a single
   session is throughput-limited to ~0.3–1 msg/s by design. To hit 500
   msg/s we need **many concurrent sessions**, not faster sessions.
@@ -23,11 +25,27 @@
 ## Patterns applied
 
 ### Fan-out at the worker pool, not at the request
-A single `POST /api/v1/messages` is **one** JetStream publish. Parallelism
-happens at the consumer side: N worker goroutines pull from the same
-queue group, so throughput scales by adding workers (or processes).
-There is no per-request `errgroup` — that would be premature fan-out
-for a single-channel dispatch.
+A successful new `POST /api/v1/messages` performs **one logical JetStream
+publish**. Concurrent identical requests are serialized by the workspace
+ledger: one owns the live claim and the others receive `425`. Replays after
+completion receive the stored `202` response. Recovery after an expired lease
+may publish again with the same trace. JetStream treats it as the same
+`Nats-Msg-Id` inside its explicit 24-hour duplicate window. Correctness does
+not depend on that finite window: each worker must acquire the separate
+`message_dispatches` provider claim before calling an adapter.
+
+### Provider dispatch claim
+
+`message_dispatches` stores an expiring token and monotonic generation. A
+worker claims in a short transaction, renews before each fallback attempt and
+performs the network call after the transaction is closed. Competing replicas
+NAK behind the live owner. A recovered queued claim fences its predecessor; an
+expired `sending` claim becomes internal state `uncertain` and is not
+automatically re-sent.
+
+Adapters classify transport-loss errors as uncertain. The orchestrator ACKs
+them without retry or fallback, persists `uncertain`, and emits only the stable
+public event `failed` with `error=DELIVERY_UNCERTAIN`.
 
 ### Pipeline: ingest → broker → worker → channel → audit
 Each stage communicates through a **durable boundary** (JetStream) or a
@@ -79,6 +97,8 @@ pattern in the system.
 | **Audit channel full → blocked hot path** | `Record` does a **non-blocking** `select { case buf <- e: default: drop + slog.Error + expvar counter }`. Audit is best-effort on the hot path; a dropped event is loud and counted, never a 50ms stall. (Compliance SLO is tracked via the counter; if it ever increments, the buffer/writer count is tuned.) |
 | **Pprof goroutine cost** | `net/http/pprof` mounted on a **separate listener** (`localhost:6060`), not on the public Echo mux. |
 | `context` cancellation ignored | Every `Dispatch`, `Publish`, `INSERT` takes `ctx` as first arg and respects cancellation. `errgroup` is *not* used; we pass ctx explicitly. |
+| **Duplicate broker delivery across replicas** | PostgreSQL claim/lease/fencing on `message_dispatches`; no process-local dedup map participates in correctness. |
+| **Provider accepted but response was lost** | The adapter returns `UncertainError`; retry and fallback stop, and the delivery is exposed as `failed` plus `DELIVERY_UNCERTAIN` for operator reconciliation. |
 
 ## Performance knobs (sized from the envelope, not guessed)
 
@@ -89,6 +109,8 @@ pattern in the system.
 | Audit batch writers | 2 | One CopyFrom at a time per writer; 2 keeps the pipe full without contending. |
 | Audit batch size / flush | 500 events or 50ms | Bounds latency of an audit row to <=50ms while amortising round-trips. |
 | JetStream `MaxDeliver` | 5 | At-least-once retry ceiling before DLQ. |
+| JetStream duplicate window | 24h | Matches outbound retention and reduces duplicate work; PostgreSQL remains authoritative. |
+| Provider claim / attempt timeout | 2m / 90s | Leaves a fencing margin around each bounded external attempt; claim is renewed per fallback. |
 | `pgxpool.MaxConns` | `2 * CPU` + queue | Small pool forces reuse; large pools add latency and memory. |
 | Session limiter | `rate.Every(2s)` ± jitter, burst 1 | Matches PRD "1–3s staggered". |
 

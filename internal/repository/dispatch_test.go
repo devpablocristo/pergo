@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -128,7 +129,7 @@ func TestMessageDispatchProviderMessageID(t *testing.T) {
 		t.Fatalf("failed to update provider message id: %v", err)
 	}
 
-	retrieved, err := repo.GetByProviderMessageID(ctx, providerID)
+	retrieved, err := repo.GetByProviderMessageID(ctx, ws.ID, providerID)
 	if err != nil {
 		t.Fatalf("failed to get by provider message id: %v", err)
 	}
@@ -140,9 +141,137 @@ func TestMessageDispatchProviderMessageID(t *testing.T) {
 		t.Errorf("expected ProviderMessageID %s, got %v", providerID, retrieved.ProviderMessageID)
 	}
 
-	_, err = repo.GetByProviderMessageID(ctx, "non-existent-provider-id")
+	otherWS, err := wsRepo.Create(ctx, "dispatch_provider_other_"+uuid.New().String())
+	if err != nil {
+		t.Fatalf("create other workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, otherWS.ID) }()
+	otherDispatch, err := repo.GetOrCreateDispatch(ctx, otherWS.ID, uuid.New().String(), "whatsapp_cloud", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("create other dispatch: %v", err)
+	}
+	if err := repo.UpdateProviderMessageID(ctx, otherDispatch.ID, providerID); err != nil {
+		t.Fatalf("same provider ID in another workspace must be allowed: %v", err)
+	}
+	otherRetrieved, err := repo.GetByProviderMessageID(ctx, otherWS.ID, providerID)
+	if err != nil {
+		t.Fatalf("get other workspace provider ID: %v", err)
+	}
+	if otherRetrieved.ID != otherDispatch.ID {
+		t.Fatalf("cross-tenant lookup returned dispatch %s, want %s", otherRetrieved.ID, otherDispatch.ID)
+	}
+
+	_, err = repo.GetByProviderMessageID(ctx, ws.ID, "non-existent-provider-id")
 	if !errors.Is(err, ErrDispatchNotFound) {
 		t.Errorf("expected ErrDispatchNotFound, got %v", err)
 	}
 }
 
+func TestMessageDispatchDeliveryClaimFencing(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+
+	ctx := context.Background()
+	wsRepo := NewWorkspaceRepository(pool)
+	repo := NewMessageDispatchRepository(pool)
+
+	ws, err := wsRepo.Create(ctx, "dispatch_claim_"+uuid.New().String())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
+
+	t.Run("only one live owner and terminal completion", func(t *testing.T) {
+		dispatch, err := repo.GetOrCreateDispatch(ctx, ws.ID, uuid.New().String(), "whatsapp_mock", nil, nil, nil)
+		if err != nil {
+			t.Fatalf("create dispatch: %v", err)
+		}
+
+		claim, retryAfter, err := repo.ClaimDelivery(ctx, dispatch.ID, time.Second)
+		if err != nil {
+			t.Fatalf("first claim: %v", err)
+		}
+		if claim.Token == uuid.Nil || claim.Generation != 1 || retryAfter != 0 {
+			t.Fatalf("unexpected claim: %+v retry_after=%s", claim, retryAfter)
+		}
+
+		_, retryAfter, err = repo.ClaimDelivery(ctx, dispatch.ID, time.Second)
+		if !errors.Is(err, ErrDispatchClaimActive) || retryAfter <= 0 {
+			t.Fatalf("second claim error=%v retry_after=%s", err, retryAfter)
+		}
+
+		if err := repo.UpdateClaimedDelivery(
+			ctx, dispatch.ID, claim, "sending", "whatsapp_mock", 0, nil, nil, false,
+		); err != nil {
+			t.Fatalf("mark sending: %v", err)
+		}
+		providerID := "provider-" + uuid.New().String()
+		if err := repo.UpdateClaimedDelivery(
+			ctx, dispatch.ID, claim, "sent", "whatsapp_mock", 0, nil, &providerID, true,
+		); err != nil {
+			t.Fatalf("mark sent: %v", err)
+		}
+
+		_, _, err = repo.ClaimDelivery(ctx, dispatch.ID, time.Second)
+		if !errors.Is(err, ErrDispatchTerminal) {
+			t.Fatalf("terminal claim error=%v, want ErrDispatchTerminal", err)
+		}
+	})
+
+	t.Run("expired queued claim recovers and fences stale owner", func(t *testing.T) {
+		dispatch, err := repo.GetOrCreateDispatch(ctx, ws.ID, uuid.New().String(), "whatsapp_mock", nil, nil, nil)
+		if err != nil {
+			t.Fatalf("create dispatch: %v", err)
+		}
+		oldClaim, _, err := repo.ClaimDelivery(ctx, dispatch.ID, 30*time.Millisecond)
+		if err != nil {
+			t.Fatalf("old claim: %v", err)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+		newClaim, _, err := repo.ClaimDelivery(ctx, dispatch.ID, time.Second)
+		if err != nil {
+			t.Fatalf("recover queued claim: %v", err)
+		}
+		if newClaim.Token == oldClaim.Token || newClaim.Generation != oldClaim.Generation+1 {
+			t.Fatalf("recovered claim=%+v, old=%+v", newClaim, oldClaim)
+		}
+		if err := repo.UpdateClaimedDelivery(
+			ctx, dispatch.ID, oldClaim, "sent", "whatsapp_mock", 0, nil, nil, true,
+		); !errors.Is(err, ErrDispatchClaimLost) {
+			t.Fatalf("stale completion error=%v, want ErrDispatchClaimLost", err)
+		}
+	})
+
+	t.Run("expired sending claim becomes uncertain without reacquisition", func(t *testing.T) {
+		dispatch, err := repo.GetOrCreateDispatch(ctx, ws.ID, uuid.New().String(), "whatsapp_mock", nil, nil, nil)
+		if err != nil {
+			t.Fatalf("create dispatch: %v", err)
+		}
+		claim, _, err := repo.ClaimDelivery(ctx, dispatch.ID, 30*time.Millisecond)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := repo.UpdateClaimedDelivery(
+			ctx, dispatch.ID, claim, "sending", "whatsapp_mock", 0, nil, nil, false,
+		); err != nil {
+			t.Fatalf("mark sending: %v", err)
+		}
+
+		time.Sleep(60 * time.Millisecond)
+		_, _, err = repo.ClaimDelivery(ctx, dispatch.ID, time.Second)
+		if !errors.Is(err, ErrDispatchDeliveryUncertain) {
+			t.Fatalf("expired sending error=%v, want ErrDispatchDeliveryUncertain", err)
+		}
+		stored, err := repo.GetByTraceID(ctx, dispatch.TraceID)
+		if err != nil {
+			t.Fatalf("get uncertain dispatch: %v", err)
+		}
+		if stored.Status != "uncertain" {
+			t.Fatalf("status=%q, want uncertain", stored.Status)
+		}
+		if stored.ErrorMessage == nil || *stored.ErrorMessage != "DELIVERY_UNCERTAIN" {
+			t.Fatalf("error_message=%v, want DELIVERY_UNCERTAIN", stored.ErrorMessage)
+		}
+	})
+}

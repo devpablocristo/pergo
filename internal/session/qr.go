@@ -251,8 +251,8 @@ func (m *Manager) onPairingSuccess(ctx context.Context, wc whatsapp.Client, work
 	}()
 
 	slog.Info("session manager: device paired",
-		"workspace_id", workspaceID,
-		"device_id", dID,
+		"device_id", dID.String(),
+		"workspace_id", workspaceID.String(),
 	)
 	return nil
 }

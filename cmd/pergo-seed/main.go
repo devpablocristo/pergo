@@ -198,7 +198,12 @@ func seedConversations(ctx context.Context, pool *pgxpool.Pool, sessRepo *reposi
 		}
 		// Upsert recipient session so the window checker and unread tracking work.
 		_ = sessRepo.Upsert(ctx, wsID, ct.from, "whatsapp_cloud", recipientIdentity, now)
-		slog.Info("seeded inbound", "workspace_id", wsID, "trace_id", trace)
+		slog.Info(
+			"seeded inbound",
+			"workspace_id", wsID.String(),
+			"trace_id", trace,
+			"channel", "whatsapp_cloud",
+		)
 	}
 	return nil
 }

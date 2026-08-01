@@ -20,6 +20,7 @@ const (
 	StatusDelivered MessageStatus = "delivered"
 	StatusRead      MessageStatus = "read"
 	StatusFailed    MessageStatus = "failed"
+	StatusUncertain MessageStatus = "uncertain"
 )
 
 // ValidChannels defines the set of accepted channel values.
@@ -109,6 +110,7 @@ type CreateMessageRequest struct {
 
 // QueueMessage wraps the published payload for JetStream queues.
 type QueueMessage struct {
+	MessageID        uuid.UUID                  `json:"message_id,omitempty"`
 	WorkspaceID      uuid.UUID                  `json:"workspace_id"`
 	ConnectionID     uuid.UUID                  `json:"connection_id"`
 	SenderIdentity   string                     `json:"sender_identity"`

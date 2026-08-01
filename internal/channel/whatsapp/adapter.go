@@ -84,7 +84,7 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 	// Convert phone number to JID
 	recipientJID, parseErr := types.ParseJID(phoneToJID(m.To))
 	if parseErr != nil {
-		return "", fmt.Errorf("whatsapp: invalid recipient: %w", parseErr)
+		return "", fmt.Errorf("whatsapp: invalid recipient identifier: %w", parseErr)
 	}
 
 	a.log.Info("whatsapp: dispatching message",
@@ -209,14 +209,18 @@ func (a *WhatsAppAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 
 	respSend, err := wc.Client().SendMessage(ctx, recipientJID, msg)
 	if err != nil {
-		a.log.Error("whatsapp: send failed",
-			"error", err,
-			"trace_id", m.TraceID,
-		)
 		if isTerminalWhatsAppError(err) {
+			a.log.Error("whatsapp: send failed terminally",
+				"error_code", "DELIVERY_TERMINAL",
+				"trace_id", m.TraceID,
+			)
 			return "", channel.NewTerminalError(fmt.Errorf("whatsapp terminal: %w", err))
 		}
-		return "", fmt.Errorf("whatsapp send: %w", err)
+		a.log.Error("whatsapp: provider outcome uncertain",
+			"error_code", "DELIVERY_UNCERTAIN",
+			"trace_id", m.TraceID,
+		)
+		return "", channel.NewUncertainError(fmt.Errorf("whatsapp send response lost: %w", err))
 	}
 
 	a.log.Info("whatsapp: message sent",

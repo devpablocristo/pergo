@@ -11,7 +11,7 @@ The outbound message worker (`internal/platform/queue/worker.go`) is a shallow m
 
 Extract a **DispatchOrchestrator** module with interface `Process(ctx, DispatchMessage, *QueueMessage) error`. The orchestrator owns all three layers:
 
-1. **Gatekeeping** — idempotency check, TTL enforcement, in-memory dedup (internal seams)
+1. **Gatekeeping** — durable delivery claim, terminal-state check and TTL enforcement
 2. **Routing** — fallback loop across channels, terminal vs transient error classification
 3. **Side effects** — audit writes, webhook events, queue depth decrement
 
@@ -54,3 +54,9 @@ Table-driven tests with mock adapters injected at the constructor:
 - **Leverage:** one interface, tests exercise idempotency + fallback + audit together
 - **Testability:** table-driven tests through the orchestrator's interface — no real Postgres or NATS needed
 - **Deletion test:** deleting the orchestrator spreads dispatch logic across callers
+
+## Amendment
+
+ADR 0009 replaces the proposed in-memory dedup seam with a PostgreSQL
+claim/lease/fencing protocol. A process-local map cannot coordinate replicas
+and is not part of provider-delivery correctness.

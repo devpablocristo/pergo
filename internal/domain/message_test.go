@@ -16,6 +16,7 @@ func TestMessageStatusValues(t *testing.T) {
 		{"delivered", StatusDelivered, "delivered"},
 		{"read", StatusRead, "read"},
 		{"failed", StatusFailed, "failed"},
+		{"uncertain", StatusUncertain, "uncertain"},
 	}
 
 	for _, tt := range tests {

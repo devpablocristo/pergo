@@ -7,6 +7,7 @@ import (
 	"net/smtp"
 
 	"github.com/google/uuid"
+	"github.com/pablojhp.pergo/internal/channel"
 )
 
 // SMTPConfig holds connection settings for SMTP email dispatch.
@@ -64,7 +65,7 @@ func (s *SMTPProvider) Send(ctx context.Context, msg *EmailMessage) (string, err
 	// Connect and send
 	err := sendMail(addr, auth, from, msg.To, mimePayload.Bytes())
 	if err != nil {
-		return "", fmt.Errorf("smtp send error to %v: %w", msg.To, err)
+		return "", channel.NewUncertainError(fmt.Errorf("smtp transport response lost: %w", err))
 	}
 
 	return providerMsgID, nil

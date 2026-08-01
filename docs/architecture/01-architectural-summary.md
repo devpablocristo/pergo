@@ -18,8 +18,9 @@ lifecycle) explicit rather than implicit.
 
 ## Functional shape
 
-- **Ingestion gateway**: `POST /api/v1/messages` → validate → attach Trace-ID →
-  enqueue to NATS JetStream work queue → `202 Accepted`.
+- **Ingestion gateway**: `POST /api/v1/messages` → validate caller-supplied
+  idempotency and trace identities → acquire a fenced PostgreSQL claim →
+  enqueue to NATS JetStream → persist the stable receipt → `202 Accepted`.
 - **Channel workers**: JetStream consumers, one logical consumer per
   channel type, dispatching to provider SDKs (whatsmeow WebSocket,
   WABA REST, Telegram REST).
@@ -35,7 +36,7 @@ lifecycle) explicit rather than implicit.
 
 | Challenge | Why it matters here |
 |-----------|---------------------|
-| **At-least-once vs. exactly-once** | JetStream `WorkQueuePolicy` guarantees at-least-once. Redelivery after a worker crash means downstream side effects (a WhatsApp message sent to a human) **must be idempotent** at the provider boundary, or deduplicated by `trace_id` before dispatch. |
+| **At-least-once vs. exactly-once** | JetStream `WorkQueuePolicy` guarantees at-least-once. A fenced PostgreSQL delivery claim serializes replicas by `trace_id`; an expired `sending` claim or ambiguous transport response becomes internal state `uncertain` instead of being sent again. |
 | **Backpressure & queue depth** | The 1,000-message-per-session limit must be enforced *before* enqueue, not after. A naive "enqueue then check" leaks memory under burst. The ingest path must read JetStream stream info (or a local counter) and return `429` synchronously. |
 | **Latency budget** | 50ms p99 ingestion leaves ~45ms for validation + broker hand-off after TLS/JSON decode. Any synchronous DB write on the hot path (auth, audit) must be removed or async. |
 | **Trace-context propagation** | Trace-ID must survive three context boundaries: HTTP → NATS message headers → worker `context.Context` → SQL `pgx.Tx`. Loss at any boundary breaks the 100% trace-correlation SLO. |
@@ -47,13 +48,17 @@ lifecycle) explicit rather than implicit.
 
 ## Design posture
 
-- Treat NATS JetStream as the **single durability boundary** for outbound
-  work. Anything not yet acknowledged is the broker's responsibility,
-  not the process's. This lets workers be stateless and crash-safe.
+- Treat PostgreSQL plus NATS JetStream as the **ingress durability protocol**:
+  PostgreSQL owns request identity, receipt, lease and fencing; JetStream owns
+  queued work. No transaction spans both systems, and retries reuse the stable
+  trace so at-least-once recovery does not create a second logical message.
+- Treat `message_dispatches` as the **provider-delivery ownership protocol**:
+  one expiring token/generation may call the provider, and every state write is
+  fenced. The transaction ends before the external call.
 - Treat PostgreSQL as the **system of record** for identity (workspaces,
   API keys, device sessions, audit logs) — never as a hot-path queue.
-- Keep the ingest path to **two external operations**: auth (cached API
-  key lookup) + JetStream publish. Everything else is moved off the
-  request goroutine.
+- Keep the new synchronous persistence narrowly scoped to the ingress ledger.
+  Its claim and completion transactions are short and contain no provider or
+  broker network call.
 - Make the channel layer a **plugin boundary** (consumer-side interface)
   so unofficial protocol breakage in whatsmeow never touches the core.

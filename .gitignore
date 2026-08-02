@@ -26,6 +26,10 @@ go.work.sum
 .env
 .env.*
 !.env.example
+*.creds
+*.pg_service.conf
+*.pem
+*.key
 
 # Local SQLite databases (if any are generated in the future)
 *.db

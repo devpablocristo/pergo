@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ -n "${PGSERVICEFILE:-}" && -f "$PGSERVICEFILE" ]] ||
+  exit 6
+for argument in "$@"; do
+  if [[ "$argument" == "--file="* ]]; then
+    [[ -f "${argument#--file=}" ]] || exit 7
+  fi
+done
+exit 0

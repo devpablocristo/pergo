@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+url=${!#}
+case "$url" in
+  *-webhook-*.example.test/healthz|*-webhook-*.example.test/readyz)
+    printf '200'
+    ;;
+  *-webhook-*.example.test/admin/|*-webhook-*.example.test/api/v1/messages)
+    printf '404'
+    ;;
+  *-api-*.example.test/healthz)
+    printf '403'
+    ;;
+  *)
+    printf 'unexpected fake curl URL: %s\n' "$url" >&2
+    exit 5
+    ;;
+esac

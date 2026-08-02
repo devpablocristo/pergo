@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log=${FAKE_GCLOUD_LOG:?}
+state_dir=${FAKE_GCLOUD_STATE_DIR:?}
+mode=${FAKE_GCLOUD_MODE:-complete}
+mkdir -p "$state_dir"
+printf '%q ' "$@" >>"$log"
+printf '\n' >>"$log"
+
+if [[ "$mode" == "forbid" ]]; then
+  printf 'fake gcloud was called in forbid mode\n' >&2
+  exit 99
+fi
+
+find_argument() {
+  local prefix=$1
+  shift
+  local argument
+  for argument in "$@"; do
+    if [[ "$argument" == "${prefix}"* ]]; then
+      printf '%s' "${argument#"$prefix"}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+contains_argument() {
+  local needle=$1
+  shift
+  local argument
+  for argument in "$@"; do
+    [[ "$argument" == *"$needle"* ]] && return 0
+  done
+  return 1
+}
+
+profile_from_name() {
+  local name=$1
+  case "$name" in
+    *-api-*) printf 'api' ;;
+    *-webhook-*) printf 'webhook' ;;
+    *-worker-*) printf 'worker' ;;
+    *-migrate-*) printf 'migrate' ;;
+    *) return 1 ;;
+  esac
+}
+
+profile_sa() {
+  local profile=$1
+  printf 'pymes-v3-pergo-%s-%s@%s.iam.gserviceaccount.com' \
+    "$profile" "$PERGO_GCP_ENV" "$PERGO_GCP_PROJECT"
+}
+
+emit_resource_json() {
+  local profile=$1
+  local db_version nats_version extra=
+  case "$profile" in
+    api)
+      db_version=$PERGO_DB_API_SECRET_VERSION
+      nats_version=$PERGO_NATS_API_SECRET_VERSION
+      extra="\"session\":\"${PERGO_PREFIX}-pergo-session-secret\",\"admin\":\"${PERGO_PREFIX}-pergo-admin-password\","
+      ;;
+    webhook)
+      db_version=$PERGO_DB_WEBHOOK_SECRET_VERSION
+      nats_version=$PERGO_NATS_WEBHOOK_SECRET_VERSION
+      ;;
+    worker)
+      db_version=$PERGO_DB_WORKER_SECRET_VERSION
+      nats_version=$PERGO_NATS_WORKER_SECRET_VERSION
+      ;;
+    migrate)
+      db_version=$PERGO_DB_MIGRATE_SECRET_VERSION
+      nats_version=$PERGO_NATS_MIGRATE_SECRET_VERSION
+      ;;
+  esac
+  printf '{'
+  printf '"image":"%s",' "$PERGO_IMAGE"
+  printf '"serviceAccount":"%s",' "$(profile_sa "$profile")"
+  printf '"args":["%s"],' "$profile"
+  printf '"cloudsql":"%s",' "$PERGO_CLOUDSQL_CONNECTION"
+  printf '"network":"%s","subnet":"%s","egress":"all-traffic",' \
+    "$PERGO_VPC_NETWORK" "$PERGO_VPC_SUBNET"
+  printf '"environment":"%s","profile":"%s",' \
+    "$PERGO_APPLICATION_ENVIRONMENT" "$profile"
+  printf '"natsUrls":"%s","natsAccount":"%s",' \
+    "$PERGO_NATS_URLS" "$PERGO_NATS_ACCOUNT"
+  printf '"dbSecret":"%s-pergo-db-%s","dbVersion":"%s",' \
+    "$PERGO_PREFIX" "$profile" "$db_version"
+  printf '"natsSecret":"%s-pergo-nats-%s","natsVersion":"%s",' \
+    "$PERGO_PREFIX" "$profile" "$nats_version"
+  printf '"kekSecret":"%s-pergo-kek","kekVersion":"%s",' \
+    "$PERGO_PREFIX" "$PERGO_KEK_SECRET_VERSION"
+  printf '"natsCredsPath":"/var/run/secrets/nats/nats.creds",'
+  printf '%s' "$extra"
+  if [[ "$profile" == "api" || "$profile" == "webhook" ]]; then
+    printf '"startupProbe":"/readyz","readinessProbe":"/readyz","livenessProbe":"/healthz",'
+  fi
+  if [[ "$profile" == "worker" ]]; then
+    printf '"instances": %s,' "$PERGO_WORKER_INSTANCES"
+  fi
+  if [[ "$profile" == "migrate" ]]; then
+    printf '"maxRetries": 0,'
+  fi
+  if [[ "$mode" == "mutable-resource-secret" ]]; then
+    printf '"forbiddenSecretVersion":":latest",'
+  fi
+  printf '"release":"%s"}\n' "$PERGO_RELEASE_SHA"
+}
+
+case "${1:-} ${2:-} ${3:-}" in
+  "services list --enabled")
+    filter=$(find_argument '--filter=config.name=' "$@")
+    printf '%s\n' "$filter"
+    ;;
+  "artifacts repositories describe")
+    printf 'DOCKER\n'
+    ;;
+  "artifacts docker images")
+    printf '%s\n' "${PERGO_IMAGE##*@}"
+    ;;
+  "sql instances describe")
+    printf 'POSTGRES_16\tus-central1\tpymes-dev-352318:us-central1:pymes-dev-db\n'
+    ;;
+  "sql databases describe")
+    printf '%s\n' "$PERGO_DATABASE"
+    ;;
+  "compute networks describe")
+    printf '%s\n' "$PERGO_VPC_NETWORK"
+    ;;
+  "compute networks subnets")
+    printf 'pymes-v3-serverless\t10.120.0.0/24\tTrue\n'
+    ;;
+  "kms keys describe")
+    printf '%s\n' "$PERGO_SECRETS_KMS_KEY"
+    ;;
+  "projects get-iam-policy "*)
+    if contains_argument 'value(bindings.role,bindings.members)' "$@"; then
+      printf 'roles/owner\tuser:softponti@gmail.com\n'
+      printf 'roles/cloudsql.client\tserviceAccount:existing@%s.iam.gserviceaccount.com\n' \
+        "$PERGO_GCP_PROJECT"
+      case "$mode" in
+        project-secret-accessor)
+          printf 'roles/secretmanager.secretAccessor\tserviceAccount:unexpected@%s.iam.gserviceaccount.com\n' \
+            "$PERGO_GCP_PROJECT"
+          ;;
+        project-secret-admin)
+          printf 'roles/secretmanager.admin\tserviceAccount:unexpected-admin@%s.iam.gserviceaccount.com\n' \
+            "$PERGO_GCP_PROJECT"
+          ;;
+        project-custom-secret-access)
+          printf 'projects/%s/roles/customSecretReader\tgroup:unexpected@example.test\n' \
+            "$PERGO_GCP_PROJECT"
+          ;;
+        project-unknown-role)
+          printf 'projects/%s/roles/unknownRole\tserviceAccount:unknown@%s.iam.gserviceaccount.com\n' \
+            "$PERGO_GCP_PROJECT" "$PERGO_GCP_PROJECT"
+          ;;
+      esac
+    elif contains_argument 'roles/cloudsql.client' "$@"; then
+      filter=$(find_argument '--filter=' "$@")
+      printf '%s\n' "${filter##*bindings.members=}"
+    elif contains_argument 'value(bindings.role)' "$@"; then
+      printf 'roles/cloudsql.client\n'
+      if [[ "$mode" == "existing-sa-extra-role" ]]; then
+        printf 'roles/editor\n'
+      fi
+    fi
+    ;;
+  "iam roles describe")
+    role=$4
+    case "$role" in
+      roles/owner|roles/secretmanager.secretAccessor|roles/secretmanager.admin|projects/*/roles/customSecretReader)
+        printf 'secretmanager.versions.access;secretmanager.versions.get\n'
+        ;;
+      roles/cloudsql.client)
+        printf 'cloudsql.instances.connect\n'
+        ;;
+      projects/*/roles/unknownRole)
+        printf 'cannot inspect role\n' >&2
+        exit 7
+        ;;
+      *)
+        printf 'resourcemanager.projects.get\n'
+        ;;
+    esac
+    ;;
+  "projects add-iam-policy-binding "*)
+    ;;
+  "secrets describe "*)
+    printf '%s\t%s\n' \
+      "$PERGO_GCP_REGION" "$PERGO_SECRETS_KMS_KEY"
+    ;;
+  "secrets versions describe")
+    secret=$(find_argument '--secret=' "$@")
+    if [[ "$mode" == "missing-secret" && "$secret" == *'-pergo-nats-worker' ]]; then
+      printf 'DISABLED\n'
+    else
+      printf 'ENABLED\n'
+    fi
+    ;;
+  "secrets versions access")
+    secret=$(find_argument '--secret=' "$@")
+    destination=$(find_argument '--out-file=' "$@")
+    case "$secret" in
+      *-pergo-db-*)
+        profile=${secret##*-}
+        password="unique-${profile}"
+        if [[ "$mode" == "duplicate-db-password" ]]; then
+          password=duplicate
+        fi
+        if [[ "$mode" == "db-socket-smuggling" &&
+          "$profile" == "worker" ]]; then
+          printf 'postgres://pergo_%s_%s:%s@/%s?host=/cloudsql/attacker:us-central1:db&note=host=/cloudsql/%s\n' \
+            "$PERGO_GCP_ENV" "$profile" "$password" "$PERGO_DATABASE" \
+            "$PERGO_CLOUDSQL_CONNECTION" >"$destination"
+        else
+          printf 'postgres://pergo_%s_%s:%s@/%s?host=/cloudsql/%s\n' \
+            "$PERGO_GCP_ENV" "$profile" "$password" "$PERGO_DATABASE" \
+            "$PERGO_CLOUDSQL_CONNECTION" >"$destination"
+        fi
+        ;;
+      *-pergo-nats-*)
+        profile=${secret##*-}
+        if [[ "$mode" == "duplicate-nats" ]]; then
+          profile=duplicate
+        fi
+        {
+          printf '%s\n' '-----BEGIN NATS USER JWT-----'
+          printf 'jwt-%s-%s\n' "$PERGO_GCP_ENV" "$profile"
+          printf '%s\n' '-----END NATS USER JWT-----'
+          printf '%s\n' '************************* IMPORTANT *************************'
+          printf '%s\n' '-----BEGIN USER NKEY SEED-----'
+          printf 'seed-%s-%s\n' "$PERGO_GCP_ENV" "$profile"
+          printf '%s\n' '-----END USER NKEY SEED-----'
+        } >"$destination"
+        ;;
+      *-pergo-kek)
+        printf '%s\n' 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=' >"$destination"
+        ;;
+      *-pergo-session-secret)
+        printf 'session-%s-0123456789abcdef0123456789abcdef\n' \
+          "$PERGO_GCP_ENV" >"$destination"
+        ;;
+      *-pergo-admin-password)
+        printf 'admin-%s-0123456789abcdef\n' "$PERGO_GCP_ENV" >"$destination"
+        ;;
+      *-pergo-nats-ca)
+        printf '%s\n%s\n%s\n' \
+          '-----BEGIN CERTIFICATE-----' \
+          'dGVzdC1jYQ==' \
+          '-----END CERTIFICATE-----' >"$destination"
+        ;;
+      *)
+        printf 'unknown secret %s\n' "$secret" >&2
+        exit 3
+        ;;
+    esac
+    ;;
+  "secrets get-iam-policy "*)
+    secret=$3
+    if contains_argument 'value(bindings.role)' "$@"; then
+      printf 'roles/secretmanager.secretAccessor\n'
+      if [[ "$mode" == "secret-admin" && "$secret" == *'-pergo-db-worker' ]]; then
+        printf 'roles/secretmanager.admin\n'
+      fi
+    else
+      case "$secret" in
+        *-pergo-db-api|*-pergo-nats-api|*-pergo-session-secret|*-pergo-admin-password)
+          printf 'serviceAccount:%s\n' "$(profile_sa api)"
+          ;;
+        *-pergo-db-webhook|*-pergo-nats-webhook)
+          printf 'serviceAccount:%s\n' "$(profile_sa webhook)"
+          ;;
+        *-pergo-db-worker|*-pergo-nats-worker)
+          printf 'serviceAccount:%s\n' "$(profile_sa worker)"
+          ;;
+        *-pergo-db-migrate|*-pergo-nats-migrate)
+          printf 'serviceAccount:%s\n' "$(profile_sa migrate)"
+          ;;
+        *-pergo-kek|*-pergo-nats-ca)
+          for profile in api webhook worker migrate; do
+            printf 'serviceAccount:%s\n' "$(profile_sa "$profile")"
+          done
+          ;;
+      esac
+    fi
+    ;;
+  "secrets add-iam-policy-binding "*)
+    ;;
+  "iam service-accounts list")
+    filter=$(find_argument '--filter=email=' "$@")
+    if [[ "$mode" == "sas-missing" &&
+      "$filter" == pymes-v3-pergo-* &&
+      ! -f "$state_dir/sa-${filter}" ]]; then
+      :
+    else
+      printf '%s\n' "$filter"
+    fi
+    ;;
+  "iam service-accounts create")
+    account_id=$4
+    touch "$state_dir/sa-${account_id}@${PERGO_GCP_PROJECT}.iam.gserviceaccount.com"
+    ;;
+  "iam service-accounts keys")
+    ;;
+  "run services describe")
+    name=$4
+    if contains_argument 'value(status.url)' "$@"; then
+      printf 'https://%s.example.test\n' "$name"
+    else
+      emit_resource_json "$(profile_from_name "$name")"
+    fi
+    ;;
+  "run services get-iam-policy")
+    name=$4
+    profile=$(profile_from_name "$name")
+    if [[ "$profile" == "api" ]]; then
+      printf 'serviceAccount:%s\n' \
+        "pymes-v3-worker-${PERGO_GCP_ENV}@${PERGO_GCP_PROJECT}.iam.gserviceaccount.com"
+      if [[ "$mode" == "extra-api-invoker" ]]; then
+        printf 'allUsers\n'
+      fi
+    else
+      printf 'allUsers\n'
+    fi
+    ;;
+  "run services set-iam-policy")
+    ;;
+  "run worker-pools describe")
+    if contains_argument 'value(scaling.manualInstanceCount)' "$@"; then
+      printf '%s\n' "$PERGO_WORKER_INSTANCES"
+    else
+      emit_resource_json worker
+    fi
+    ;;
+  "run worker-pools deploy")
+    ;;
+  "run jobs describe")
+    emit_resource_json migrate
+    ;;
+  "run jobs get-iam-policy")
+    ;;
+  "run jobs deploy")
+    ;;
+  "run jobs execute")
+    ;;
+  "run deploy "*)
+    ;;
+  *)
+    printf 'unhandled fake gcloud command: %s\n' "$*" >&2
+    exit 4
+    ;;
+esac

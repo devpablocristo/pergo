@@ -1,5 +1,17 @@
 # Milestones
 
+## v1.5 Email Channels & Tracking Engine (Shipped: 2026-07-24)
+
+**Phases completed:** 1 phase, 2 plans, 6 tasks
+
+**Key accomplishments:**
+
+- Added SMTP, Amazon SES and Mautic providers behind the unified email dispatcher.
+- Added multipart MIME generation and the email channel variants to the public domain model.
+- Added HMAC-signed open/click tracking and normalized SES/Mautic delivery events.
+
+---
+
 ## v1.4 Omnichannel Integrations (Shipped: 2026-07-20)
 
 **Phases completed:** 3 phases, 3 plans, 11 tasks
@@ -25,19 +37,6 @@
 - Wired typebot.Forwarder in composition root, reconciled settings schema with the storage model, corrected the webhook query database schema, and added extensive integration/unit tests.
 - Populated routing and trace metadata fields on outbound queue messages forwarded by Typebot
 - Deterministic Typebot message mapping supporting media placeholder and channel-unique session tracking
-
----
-
-## v1.3 Chatwoot & Typebot Integrations (Shipped: 2026-07-18)
-
-**Phases completed:** 4 phases, 7 plans, 19 tasks
-
-**Key accomplishments:**
-
-- Implemented the core database schemas, encryption-at-rest repository interfaces, admin UI settings forms, and query-parameter authenticated receiver webhook stub.
-- Stateful handoff routing foundation including schema migration, Typebot sync interception, lazy-evaluated cooldowns, pause_bot verb, and Chatwoot agent reply auto-pausing.
-- Operator console UI integration including native outbound message auto-pausing, manual status toggle badge component rendering, and toggle-bot HTMX endpoint routing.
-- Refactored the monolithic VerbsEngine execution loop into a clean, polymorphic design using a VerbHandler map and decoupled handler structs.
 
 ---
 

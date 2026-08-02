@@ -2,17 +2,21 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
+	"github.com/pablojhp.pergo/internal/platform/netpolicy"
 	"github.com/pablojhp.pergo/internal/platform/queue"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/webhook"
@@ -20,10 +24,19 @@ import (
 )
 
 type WebhookDLQHandler struct {
-	Repo       *repository.WebhookDLQRepository
-	Subs       *repository.WebhookSubscriptionRepository
-	Workspaces *repository.WorkspaceRepository
-	Publisher  *queue.JetStreamPublisher
+	Repo        *repository.WebhookDLQRepository
+	Subs        *repository.WebhookSubscriptionRepository
+	Workspaces  *repository.WorkspaceRepository
+	Publisher   WebhookRetryPublisher
+	HTTPClient  *http.Client
+	ValidateURL func(context.Context, string) error
+}
+
+// WebhookRetryPublisher is the consumer-owned port used by the admin retry
+// action. Production wires JetStream; tests can prove acceptance semantics
+// without a broker.
+type WebhookRetryPublisher interface {
+	Publish(ctx context.Context, subject string, data []byte, dedupID string) error
 }
 
 func NewWebhookDLQHandler(
@@ -32,11 +45,14 @@ func NewWebhookDLQHandler(
 	workspaces *repository.WorkspaceRepository,
 	publisher *queue.JetStreamPublisher,
 ) *WebhookDLQHandler {
+	policy := netpolicy.NewPublicHTTPPolicy()
 	return &WebhookDLQHandler{
-		Repo:       repo,
-		Subs:       subs,
-		Workspaces: workspaces,
-		Publisher:  publisher,
+		Repo:        repo,
+		Subs:        subs,
+		Workspaces:  workspaces,
+		Publisher:   publisher,
+		HTTPClient:  policy.Client(10 * time.Second),
+		ValidateURL: policy.ValidateURL,
 	}
 }
 
@@ -86,11 +102,7 @@ func (h *WebhookDLQHandler) GetSubscriptionNewForm(c *echo.Context) error {
 
 // GetSubscriptionEditForm returns the edit subscription modal form.
 func (h *WebhookDLQHandler) GetSubscriptionEditForm(c *echo.Context) error {
-	wsIDStr, err := echo.PathParam[string](c, "workspace_id")
-	if err != nil {
-		return c.String(http.StatusBadRequest, "invalid workspace ID")
-	}
-	workspaceID, err := uuid.Parse(wsIDStr)
+	workspaceID, err := webhookRouteWorkspaceID(c)
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid workspace ID")
 	}
@@ -104,7 +116,7 @@ func (h *WebhookDLQHandler) GetSubscriptionEditForm(c *echo.Context) error {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
 	}
 
-	sub, err := h.Subs.Get(c.Request().Context(), subscriptionID)
+	sub, err := h.Subs.GetForWorkspace(c.Request().Context(), workspaceID, subscriptionID)
 	if err != nil {
 		return c.String(http.StatusNotFound, "subscription not found")
 	}
@@ -130,6 +142,12 @@ func (h *WebhookDLQHandler) CreateSubscription(c *echo.Context) error {
 	if url == "" || secret == "" {
 		return c.String(http.StatusBadRequest, "url and secret are required")
 	}
+	if err := h.ValidateURL(c.Request().Context(), url); err != nil {
+		return c.String(http.StatusBadRequest, "webhook URL must be a public HTTPS destination")
+	}
+	if err := validateWebhookSubscriptionSecret(secret); err != nil {
+		return c.String(http.StatusBadRequest, err.Error())
+	}
 
 	if len(eventTypes) == 0 {
 		eventTypes = []string{"*"}
@@ -146,6 +164,10 @@ func (h *WebhookDLQHandler) CreateSubscription(c *echo.Context) error {
 
 // UpdateSubscription updates an existing webhook subscription.
 func (h *WebhookDLQHandler) UpdateSubscription(c *echo.Context) error {
+	workspaceID, err := webhookRouteWorkspaceID(c)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "invalid workspace ID")
+	}
 	subIDStr, err := echo.PathParam[string](c, "subscription_id")
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
@@ -163,6 +185,9 @@ func (h *WebhookDLQHandler) UpdateSubscription(c *echo.Context) error {
 	if url == "" {
 		return c.String(http.StatusBadRequest, "url is required")
 	}
+	if err := h.ValidateURL(c.Request().Context(), url); err != nil {
+		return c.String(http.StatusBadRequest, "webhook URL must be a public HTTPS destination")
+	}
 
 	if len(eventTypes) == 0 {
 		eventTypes = []string{"*"}
@@ -170,11 +195,17 @@ func (h *WebhookDLQHandler) UpdateSubscription(c *echo.Context) error {
 
 	var secretBytes []byte
 	if secret != "********" && secret != "" {
+		if err := validateWebhookSubscriptionSecret(secret); err != nil {
+			return c.String(http.StatusBadRequest, err.Error())
+		}
 		secretBytes = []byte(secret)
 	}
 
-	err = h.Subs.Update(c.Request().Context(), subscriptionID, url, eventTypes, active, secretBytes)
+	err = h.Subs.UpdateForWorkspace(c.Request().Context(), workspaceID, subscriptionID, url, eventTypes, active, secretBytes)
 	if err != nil {
+		if errors.Is(err, repository.ErrWebhookSubscriptionNotFound) {
+			return c.String(http.StatusNotFound, "subscription not found")
+		}
 		return c.String(http.StatusInternalServerError, "failed to update subscription")
 	}
 
@@ -184,6 +215,10 @@ func (h *WebhookDLQHandler) UpdateSubscription(c *echo.Context) error {
 
 // DeleteSubscription deletes a webhook subscription.
 func (h *WebhookDLQHandler) DeleteSubscription(c *echo.Context) error {
+	workspaceID, err := webhookRouteWorkspaceID(c)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "invalid workspace ID")
+	}
 	subIDStr, err := echo.PathParam[string](c, "subscription_id")
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
@@ -193,8 +228,11 @@ func (h *WebhookDLQHandler) DeleteSubscription(c *echo.Context) error {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
 	}
 
-	err = h.Subs.Delete(c.Request().Context(), subscriptionID)
+	err = h.Subs.DeleteForWorkspace(c.Request().Context(), workspaceID, subscriptionID)
 	if err != nil {
+		if errors.Is(err, repository.ErrWebhookSubscriptionNotFound) {
+			return c.String(http.StatusNotFound, "subscription not found")
+		}
 		return c.String(http.StatusInternalServerError, "failed to delete subscription")
 	}
 
@@ -203,11 +241,7 @@ func (h *WebhookDLQHandler) DeleteSubscription(c *echo.Context) error {
 
 // GetSubscriptionTestForm returns the simulation modal form.
 func (h *WebhookDLQHandler) GetSubscriptionTestForm(c *echo.Context) error {
-	wsIDStr, err := echo.PathParam[string](c, "workspace_id")
-	if err != nil {
-		return c.String(http.StatusBadRequest, "invalid workspace ID")
-	}
-	workspaceID, err := uuid.Parse(wsIDStr)
+	workspaceID, err := webhookRouteWorkspaceID(c)
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid workspace ID")
 	}
@@ -221,7 +255,7 @@ func (h *WebhookDLQHandler) GetSubscriptionTestForm(c *echo.Context) error {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
 	}
 
-	sub, err := h.Subs.Get(c.Request().Context(), subscriptionID)
+	sub, err := h.Subs.GetForWorkspace(c.Request().Context(), workspaceID, subscriptionID)
 	if err != nil {
 		return c.String(http.StatusNotFound, "subscription not found")
 	}
@@ -231,6 +265,10 @@ func (h *WebhookDLQHandler) GetSubscriptionTestForm(c *echo.Context) error {
 
 // TestSubscription runs a synchronous simulated webhook POST request.
 func (h *WebhookDLQHandler) TestSubscription(c *echo.Context) error {
+	workspaceID, err := webhookRouteWorkspaceID(c)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "invalid workspace ID")
+	}
 	subIDStr, err := echo.PathParam[string](c, "subscription_id")
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid subscription ID")
@@ -241,7 +279,7 @@ func (h *WebhookDLQHandler) TestSubscription(c *echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
-	sub, err := h.Subs.Get(ctx, subscriptionID)
+	sub, err := h.Subs.GetForWorkspace(ctx, workspaceID, subscriptionID)
 	if err != nil {
 		return c.String(http.StatusNotFound, "subscription not found")
 	}
@@ -269,24 +307,22 @@ func (h *WebhookDLQHandler) TestSubscription(c *echo.Context) error {
 	req.Header.Set("X-Trace-ID", "simulated-"+uuid.New().String()[:8])
 	req.Header.Set("X-PerGo-Simulated", "true")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := h.HTTPClient.Do(req)
 
 	latency := time.Since(start).Milliseconds()
 
 	if err != nil {
-		// Log the error and return a failure block
 		return mw.Render(c, http.StatusOK, pages.TestResultFragment(
 			http.StatusGatewayTimeout,
 			latency,
 			signature,
-			fmt.Sprintf("HTTP Request Failed: %v", err),
+			"HTTP request failed",
 			nil,
 		))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	bodyStr := string(bodyBytes)
 	if len(bodyStr) > 1000 {
 		bodyStr = bodyStr[:1000] + "... (truncated)"
@@ -299,6 +335,26 @@ func (h *WebhookDLQHandler) TestSubscription(c *echo.Context) error {
 		bodyStr,
 		resp.Header,
 	))
+}
+
+func webhookRouteWorkspaceID(c *echo.Context) (uuid.UUID, error) {
+	raw, err := echo.PathParam[string](c, "workspace_id")
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.Parse(raw)
+}
+
+func validateWebhookSubscriptionSecret(secret string) error {
+	if len([]byte(secret)) < 32 {
+		return errors.New("webhook secret must contain at least 32 bytes")
+	}
+	switch strings.ToLower(strings.TrimSpace(secret)) {
+	case "change-me", "changeme", "secret", "password":
+		return errors.New("webhook secret is not strong enough")
+	default:
+		return nil
+	}
 }
 
 // GlobalPage renders the global webhooks and DLQ page for the sidebar.
@@ -392,10 +448,11 @@ func (h *WebhookDLQHandler) RetryDLQ(c *echo.Context) error {
 		return c.String(http.StatusNotFound, "DLQ log not found")
 	}
 
-	// Publish directly back to NATS WEBHOOK_DELIVERIES workqueue subject:
-	// webhooks.deliveries.<workspace_id>.<subscription_id>
+	// A manual retry preserves one deterministic broker identity. If the
+	// publish succeeds but deleting the DLQ row fails, another click is safely
+	// deduplicated by JetStream.
 	task := webhook.WebhookDeliveryTask{
-		ID:             uuid.New(),
+		ID:             webhookDLQRetryID(item.ID),
 		SubscriptionID: item.SubscriptionID,
 		WorkspaceID:    item.WorkspaceID,
 		Event:          item.EventType,
@@ -410,7 +467,7 @@ func (h *WebhookDLQHandler) RetryDLQ(c *echo.Context) error {
 		return c.String(http.StatusInternalServerError, "failed to marshal retry payload")
 	}
 
-	subject := fmt.Sprintf("webhooks.deliveries.%s.%s", item.WorkspaceID, item.SubscriptionID)
+	subject := fmt.Sprintf("webhooks.deliveries.%s", item.WorkspaceID)
 	err = h.Publisher.Publish(ctx, subject, payload, task.ID.String())
 	if err != nil {
 		slog.Error("admin: failed to publish retry event to NATS", "error", err, "dlq_id", id, "subject", subject)
@@ -424,4 +481,11 @@ func (h *WebhookDLQHandler) RetryDLQ(c *echo.Context) error {
 	}
 
 	return c.HTML(http.StatusOK, "<td colspan=\"8\" class=\"success-icon\" style=\"color: var(--color-success); text-align: center;\">✓ Re-enqueued for delivery</td>")
+}
+
+func webhookDLQRetryID(dlqID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(
+		uuid.NameSpaceURL,
+		[]byte("pergo:webhook-dlq-retry:v1:"+dlqID.String()),
+	)
 }

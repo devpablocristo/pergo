@@ -3,7 +3,9 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -120,6 +122,27 @@ type telegramConfig struct {
 	BotUsername string `json:"bot_username"`
 }
 
+// ErrTelegramMediaRetryable tells the webhook boundary not to acknowledge an
+// attachment that could not be durably ingested.
+var ErrTelegramMediaRetryable = errors.New("telegram_media_retryable")
+
+type mediaAvailability interface {
+	MediaEnabled() bool
+}
+
+// CredentialsMatchWebhookSecret selects the correct bot connection without
+// leaking comparison timing or exposing the credential schema to the handler.
+func CredentialsMatchWebhookSecret(credentials []byte, received string) bool {
+	if received == "" {
+		return false
+	}
+	var config telegramConfig
+	if err := json.Unmarshal(credentials, &config); err != nil || config.SecretToken == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(config.SecretToken), []byte(received)) == 1
+}
+
 // Parse decodes the Telegram payload, validates the token, maps contacts, downloads media, and returns an InboundEvent.
 func (a *TelegramInboundAdapter) Parse(
 	ctx context.Context,
@@ -140,7 +163,7 @@ func (a *TelegramInboundAdapter) Parse(
 	}
 
 	// 3. Verify secret token
-	if config.SecretToken != receivedToken {
+	if !CredentialsMatchWebhookSecret(conn.Credentials, receivedToken) {
 		return nil, fmt.Errorf("secret token mismatch")
 	}
 
@@ -175,19 +198,11 @@ func (a *TelegramInboundAdapter) Parse(
 			messageThreadIDInt = update.CallbackQuery.Message.MessageThreadID
 		}
 
-		// Acknowledge the callback query in background
-		go func(cbID, token string) {
-			ackURL := fmt.Sprintf("%s/bot%s/answerCallbackQuery", a.telegramBaseURL, token)
-			reqBody, _ := json.Marshal(map[string]string{"callback_query_id": cbID})
-			req, err := http.NewRequest(http.MethodPost, ackURL, bytes.NewReader(reqBody))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/json")
-				resp, err := a.client.Do(req)
-				if err == nil {
-					_ = resp.Body.Close()
-				}
-			}
-		}(callbackID, config.Token)
+		if err := a.acknowledgeCallback(ctx, callbackID, config.Token); err != nil {
+			// Do not include the transport error: net/http may embed the URL,
+			// whose path contains the bot token.
+			slog.Warn("tg inbound: callback acknowledgement failed")
+		}
 
 	} else if update.Message != nil {
 		chat = update.Message.Chat
@@ -287,7 +302,14 @@ func (a *TelegramInboundAdapter) Parse(
 	}
 
 	var inboundMedia *inbound.InboundMedia
-	if fileID != "" && config.Token != "" {
+	if mediaType != "" {
+		if fileID == "" || config.Token == "" {
+			return nil, fmt.Errorf("%w: invalid_media_metadata", ErrTelegramMediaRetryable)
+		}
+		availability, ok := a.downloader.(mediaAvailability)
+		if !ok || !availability.MediaEnabled() {
+			return nil, fmt.Errorf("%w: media_disabled", ErrTelegramMediaRetryable)
+		}
 		mediaBytes, err := a.downloadTelegramFile(ctx, fileID, config.Token)
 		if err == nil {
 			inboundMedia = &inbound.InboundMedia{
@@ -297,7 +319,7 @@ func (a *TelegramInboundAdapter) Parse(
 				Caption:   caption,
 			}
 		} else {
-			slog.Error("tg inbound: failed to download media file", "error", err, "file_id", fileID)
+			return nil, fmt.Errorf("%w: media_download_failed", ErrTelegramMediaRetryable)
 		}
 	}
 
@@ -353,16 +375,40 @@ func (a *TelegramInboundAdapter) Parse(
 	}, nil
 }
 
+func (a *TelegramInboundAdapter) acknowledgeCallback(ctx context.Context, callbackID, token string) error {
+	if callbackID == "" || token == "" {
+		return errors.New("callback ID and token are required")
+	}
+	ackCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	ackURL := fmt.Sprintf("%s/bot%s/answerCallbackQuery", a.telegramBaseURL, token)
+	reqBody, _ := json.Marshal(map[string]string{"callback_query_id": callbackID})
+	req, err := http.NewRequestWithContext(ackCtx, http.MethodPost, ackURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return errors.New("telegram callback request creation failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return errors.New("telegram callback transport failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("telegram callback returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (a *TelegramInboundAdapter) downloadTelegramFile(ctx context.Context, fileID, token string) ([]byte, error) {
 	reqURL := fmt.Sprintf("%s/bot%s/getFile?file_id=%s", a.telegramBaseURL, token, fileID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("telegram getFile request creation failed")
 	}
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("telegram getFile transport failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -389,7 +435,7 @@ func (a *TelegramInboundAdapter) downloadTelegramFile(ctx context.Context, fileI
 
 	res, err := a.downloader.Download(ctx, downloadURL, nil, 25*1024*1024)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("telegram media download failed")
 	}
 
 	return res.Bytes, nil

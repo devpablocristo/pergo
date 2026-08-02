@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pablojhp.pergo/internal/channel"
 	"github.com/pablojhp.pergo/internal/domain"
+	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
+	"github.com/pablojhp.pergo/internal/platform/storage"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -353,6 +356,28 @@ func TestWABADispatch(t *testing.T) {
 		}
 	})
 
+	for _, body := range []string{`{}`, `{"messages":[`} {
+		t.Run("Accepted Response Without Message ID Is Uncertain "+body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+
+			adapter := NewWABAAdapter(connectionsRepo, nil, nil, "")
+			adapter.SetBaseURL(server.URL)
+			providerID, err := adapter.Dispatch(tenantCtx, &channel.MessagePayload{
+				ConnectionID:   connID,
+				SenderIdentity: "+12345_phone_id",
+				To:             "+12345",
+				Body:           "hi",
+			})
+			if providerID != "" || !channel.IsUncertain(err) {
+				t.Fatalf("provider_id=%q error=%v, want empty uncertain outcome", providerID, err)
+			}
+		})
+	}
+
 	t.Run("Local Window Checker - Expired/Missing", func(t *testing.T) {
 		mockChecker := &mockWABAWindowChecker{open: false}
 		adapter := NewWABAAdapter(connectionsRepo, nil, mockChecker, "")
@@ -643,9 +668,8 @@ func TestWABAInboundAdapterStatuses(t *testing.T) {
 	adapter := NewWABAInboundAdapter(nil)
 
 	// Create dummy credentials JSON
-	creds := wabaVerifyCreds{
-		VerifyToken: "my_verify_token",
-		Token:       "my_token",
+	creds := wabaInboundCreds{
+		Token: "my_token",
 	}
 	credsJSON, _ := json.Marshal(creds)
 	wsID := uuid.New()
@@ -737,5 +761,75 @@ func TestWABAInboundAdapterStatuses(t *testing.T) {
 		if ev.Metadata == nil || ev.Metadata["type"] != "status_update" {
 			t.Errorf("event %d: expected Metadata type status_update, got %v", i, ev.Metadata)
 		}
+	}
+}
+
+func TestWABAInboundMediaDisabledFailsBeforeMetaNetwork(t *testing.T) {
+	var requests atomic.Int32
+	meta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer meta.Close()
+
+	adapter := NewWABAInboundAdapter(media.NewDefaultEngine(storage.NewDisabledS3Client()))
+	adapter.SetBaseURL(meta.URL)
+
+	credentials, err := json.Marshal(wabaInboundCreds{Token: "meta-token-must-not-be-used"})
+	if err != nil {
+		t.Fatalf("marshal credentials: %v", err)
+	}
+	conn := &repository.Connection{
+		ID:          uuid.New(),
+		WorkspaceID: uuid.New(),
+		Credentials: credentials,
+	}
+	payload := []byte(`{
+		"entry":[{
+			"changes":[{
+				"value":{
+					"metadata":{"phone_number_id":"phone-id"},
+					"messages":[{
+						"from":"5511999999999",
+						"id":"wamid.media",
+						"type":"image",
+						"image":{"id":"media-id","mime_type":"image/jpeg"}
+					}]
+				}
+			}]
+		}]
+	}`)
+
+	events, err := adapter.Parse(context.Background(), payload, nil, conn)
+	if !errors.Is(err, media.ErrDisabled) {
+		t.Fatalf("Parse() error = %v, want media.ErrDisabled", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("Parse() returned %d events; media must not be ingested without storage", len(events))
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("Meta requests = %d, want zero", got)
+	}
+}
+
+func TestWABAInboundMalformedAttachmentIsNeverAcknowledgedAsText(t *testing.T) {
+	credentials, _ := json.Marshal(wabaInboundCreds{Token: "meta-token"})
+	adapter := NewWABAInboundAdapter(media.NewDefaultEngine(nil))
+	payload := []byte(`{
+		"entry":[{"changes":[{"value":{
+			"metadata":{"phone_number_id":"phone-id"},
+			"messages":[{"from":"5511999999999","id":"wamid.media","type":"image"}]
+		}}]}]
+	}`)
+	events, err := adapter.Parse(context.Background(), payload, nil, &repository.Connection{
+		ID:          uuid.New(),
+		WorkspaceID: uuid.New(),
+		Credentials: credentials,
+	})
+	if !errors.Is(err, ErrWABAMediaRetryable) {
+		t.Fatalf("Parse() error = %v, want ErrWABAMediaRetryable", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("Parse() returned %d events for malformed attachment", len(events))
 	}
 }

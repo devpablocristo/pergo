@@ -3,13 +3,15 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/pablojhp.pergo/internal/inbound"
 	"github.com/pablojhp.pergo/internal/media"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -20,12 +22,20 @@ type WABAInboundAdapter struct {
 	graphBaseURL string
 }
 
+// ErrWABAMediaRetryable marks an attachment ingestion failure that must make
+// the webhook return a retryable response rather than acknowledge data loss.
+var ErrWABAMediaRetryable = errors.New("waba_media_retryable")
+
+type mediaAvailability interface {
+	MediaEnabled() bool
+}
+
 // NewWABAInboundAdapter creates a new WABAInboundAdapter.
 func NewWABAInboundAdapter(downloader media.Downloader) *WABAInboundAdapter {
 	return &WABAInboundAdapter{
 		downloader:   downloader,
 		client:       &http.Client{Timeout: 30 * time.Second},
-		graphBaseURL: "https://graph.facebook.com/v20.0",
+		graphBaseURL: metaapi.BaseURL(metaapi.DefaultVersion),
 	}
 }
 
@@ -34,9 +44,8 @@ func (a *WABAInboundAdapter) SetBaseURL(url string) {
 	a.graphBaseURL = url
 }
 
-type wabaVerifyCreds struct {
-	VerifyToken string `json:"verify_token"`
-	Token       string `json:"token"`
+type wabaInboundCreds struct {
+	Token string `json:"token"`
 }
 
 type wabaWebhookPayload struct {
@@ -74,6 +83,7 @@ type ValueData struct {
 		Document *wabaMediaObj `json:"document,omitempty"`
 		Audio    *wabaMediaObj `json:"audio,omitempty"`
 		Video    *wabaMediaObj `json:"video,omitempty"`
+		Sticker  *wabaMediaObj `json:"sticker,omitempty"`
 		Location *struct {
 			Latitude  float64 `json:"latitude"`
 			Longitude float64 `json:"longitude"`
@@ -117,7 +127,7 @@ func (a *WABAInboundAdapter) Parse(
 		return nil, fmt.Errorf("failed to parse WABA payload: %w", err)
 	}
 
-	var creds wabaVerifyCreds
+	var creds wabaInboundCreds
 	if err := json.Unmarshal(conn.Credentials, &creds); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal credentials: %w", err)
 	}
@@ -164,25 +174,39 @@ func (a *WABAInboundAdapter) Parse(
 				case "video":
 					mediaObj = msg.Video
 					mediaType = "video"
+				case "sticker":
+					mediaObj = msg.Sticker
+					mediaType = "image"
 				}
 
 				var inboundMedia *inbound.InboundMedia
-				if mediaObj != nil && creds.Token != "" {
+				if mediaType != "" && (mediaObj == nil || strings.TrimSpace(mediaObj.ID) == "") {
+					return nil, fmt.Errorf("%w: media payload is missing its identifier", ErrWABAMediaRetryable)
+				}
+				if mediaObj != nil {
+					if creds.Token == "" || a.downloader == nil {
+						return nil, fmt.Errorf("%w: %w", ErrWABAMediaRetryable, media.ErrDisabled)
+					}
+					if availability, ok := a.downloader.(mediaAvailability); ok && !availability.MediaEnabled() {
+						return nil, fmt.Errorf("%w: %w", ErrWABAMediaRetryable, media.ErrDisabled)
+					}
+
 					dlURL, err := a.fetchWABADownloadURL(ctx, mediaObj.ID, creds.Token)
-					if err == nil {
-						mediaBytes, err := a.downloadWABAFile(ctx, dlURL, creds.Token)
-						if err == nil {
-							inboundMedia = &inbound.InboundMedia{
-								Bytes:     mediaBytes,
-								MediaType: mediaType,
-								Filename:  mediaObj.Filename,
-								Caption:   mediaObj.Caption,
-							}
-						} else {
-							slog.Error("waba inbound: failed to download media file", "error", err, "media_id", mediaObj.ID)
+					if err != nil {
+						return nil, fmt.Errorf("%w: fetch media metadata failed", ErrWABAMediaRetryable)
+					}
+					mediaBytes, err := a.downloadWABAFile(ctx, dlURL, creds.Token)
+					if err != nil {
+						if errors.Is(err, media.ErrDisabled) {
+							return nil, fmt.Errorf("%w: %w", ErrWABAMediaRetryable, err)
 						}
-					} else {
-						slog.Error("waba inbound: failed to fetch media URL from Meta", "error", err, "media_id", mediaObj.ID)
+						return nil, fmt.Errorf("%w: download media failed", ErrWABAMediaRetryable)
+					}
+					inboundMedia = &inbound.InboundMedia{
+						Bytes:     mediaBytes,
+						MediaType: mediaType,
+						Filename:  mediaObj.Filename,
+						Caption:   mediaObj.Caption,
 					}
 				}
 

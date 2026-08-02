@@ -23,6 +23,7 @@ import (
 	"github.com/pablojhp.pergo/internal/domain"
 	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/outbound"
+	"github.com/pablojhp.pergo/internal/platform/messagebus"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/platform/storage"
 	"github.com/pablojhp.pergo/internal/repository"
@@ -392,6 +393,12 @@ func (h *MessageHandler) Create(c *echo.Context) error {
 				Code:     "queue_full",
 				Message:  "per-session message queue limit exceeded",
 				MoreInfo: "https://docs.pergo.dev/errors/queue_full",
+			})
+		}
+		if errors.Is(err, messagebus.ErrPayloadTooLarge) {
+			return c.JSON(http.StatusRequestEntityTooLarge, domain.ErrorResponse{
+				Code:    "payload_too_large",
+				Message: "serialized message exceeds the queue transport limit",
 			})
 		}
 

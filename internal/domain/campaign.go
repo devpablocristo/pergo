@@ -15,8 +15,16 @@ const (
 	CampaignStatusDraft     CampaignStatus = "draft"
 	CampaignStatusScheduled CampaignStatus = "scheduled"
 	CampaignStatusSending   CampaignStatus = "sending"
+	// CampaignStatusCompleted means every recipient command was durably
+	// accepted by the outbound queue. Provider delivery remains observable on
+	// each message dispatch and its delivery receipts.
 	CampaignStatusCompleted CampaignStatus = "completed"
 	CampaignStatusCancelled CampaignStatus = "cancelled"
+
+	// CampaignMaxDelaySeconds bounds the durable pause between consecutive
+	// batches of one campaign. The delay is scheduling metadata; workers never
+	// sleep while holding a global JetStream delivery.
+	CampaignMaxDelaySeconds = 3600
 )
 
 // CampaignRecipient represents an individual record within a mailing campaign.
@@ -34,20 +42,23 @@ type SkippedRow struct {
 
 // Campaign represents a bulk mailing campaign model.
 type Campaign struct {
-	ID           uuid.UUID          `json:"id"`
-	WorkspaceID  uuid.UUID          `json:"workspace_id"`
-	ConnectionID *uuid.UUID         `json:"connection_id"`
-	Name         string             `json:"name"`
-	Status       CampaignStatus     `json:"status"`
-	BatchSize    int                `json:"batch_size"`
-	DelaySeconds int                `json:"delay_seconds"`
-	TemplateName *string            `json:"template_name"`
-	Channel      *string            `json:"channel"`
-	Recipients   []CampaignRecipient `json:"recipients"`
-	SkippedRows  []SkippedRow       `json:"skipped_rows"`
-	ScheduledAt  *time.Time         `json:"scheduled_at"`
-	CreatedAt    time.Time          `json:"created_at"`
-	UpdatedAt    time.Time          `json:"updated_at"`
+	ID           uuid.UUID      `json:"id"`
+	WorkspaceID  uuid.UUID      `json:"workspace_id"`
+	ConnectionID *uuid.UUID     `json:"connection_id"`
+	Name         string         `json:"name"`
+	Status       CampaignStatus `json:"status"`
+	BatchSize    int            `json:"batch_size"`
+	DelaySeconds int            `json:"delay_seconds"`
+	TemplateName *string        `json:"template_name"`
+	// TemplateLanguage identifies the exact approved WABA template variant.
+	// It remains nil for non-WABA and legacy campaigns.
+	TemplateLanguage *string             `json:"template_language,omitempty"`
+	Channel          *string             `json:"channel"`
+	Recipients       []CampaignRecipient `json:"recipients"`
+	SkippedRows      []SkippedRow        `json:"skipped_rows"`
+	ScheduledAt      *time.Time          `json:"scheduled_at"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
 }
 
 // SniffDelimiter checks the frequencies of commas, semicolons, and tabs to auto-detect a CSV delimiter.

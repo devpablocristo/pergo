@@ -106,6 +106,16 @@ func TestCredentialsRepository(t *testing.T) {
 	if bytes.Equal(dbCredentials, secretPayload) {
 		t.Error("expected credentials in database to be encrypted, but they matched plaintext")
 	}
+	var initialRevision int64
+	if err := pool.QueryRow(ctx,
+		"SELECT credential_revision FROM connections WHERE workspace_id = $1 AND channel = $2",
+		ws.ID, channelName,
+	).Scan(&initialRevision); err != nil {
+		t.Fatalf("read initial credential revision: %v", err)
+	}
+	if initialRevision != 0 {
+		t.Fatalf("initial credential revision = %d, want 0", initialRevision)
+	}
 
 	// 5. Verify Get decrypts correctly
 	decrypted, err := repo.Get(ctx, ws.ID, channelName)
@@ -131,6 +141,16 @@ func TestCredentialsRepository(t *testing.T) {
 
 	if !bytes.Equal(decryptedNew, newSecretPayload) {
 		t.Errorf("decrypted updated credentials = %q, want %q", string(decryptedNew), string(newSecretPayload))
+	}
+	var updatedRevision int64
+	if err := pool.QueryRow(ctx,
+		"SELECT credential_revision FROM connections WHERE workspace_id = $1 AND channel = $2",
+		ws.ID, channelName,
+	).Scan(&updatedRevision); err != nil {
+		t.Fatalf("read updated credential revision: %v", err)
+	}
+	if updatedRevision != 1 {
+		t.Fatalf("updated credential revision = %d, want 1", updatedRevision)
 	}
 
 	// 7. Verify Delete

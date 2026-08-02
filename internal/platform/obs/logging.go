@@ -27,6 +27,7 @@ var sensitiveAttributeKeys = map[string]struct{}{
 	"payload":         {},
 	"phone":           {},
 	"phone_number":    {},
+	"phone_number_id": {},
 	"proxy_url":       {},
 	"recipient":       {},
 	"recipient_e164":  {},

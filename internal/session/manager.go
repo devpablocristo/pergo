@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -31,7 +32,12 @@ const (
 
 	// maxReconnectBackoff caps the exponential backoff.
 	maxReconnectBackoff = 5 * time.Minute
+
+	statusUpdateTimeout = 2 * time.Second
 )
+
+// ErrManagerStopping is returned when work is submitted after shutdown starts.
+var ErrManagerStopping = errors.New("session manager is stopping")
 
 // Manager coordinates WhatsApp device lifecycle: startup reconnection,
 // session registration, and graceful shutdown.
@@ -46,8 +52,12 @@ type Manager struct {
 	reconnect        func(context.Context, *repository.Connection) error
 	wait             func(context.Context, time.Duration) bool
 	initialJitter    func() time.Duration
-	reconnectMu      sync.Mutex
-	reconnectCancel  context.CancelFunc
+	lifecycleMu      sync.Mutex
+	lifecycleCtx     context.Context
+	lifecycleCancel  context.CancelFunc
+	stopParent       func() bool
+	stopping         bool
+	producers        sync.WaitGroup
 }
 
 type connectionStore interface {
@@ -129,17 +139,12 @@ func NewManagerWithClientFactory(
 // backoff and storm protection (semaphore cap).
 // It blocks until all reconnection attempts complete or ctx is cancelled.
 func (m *Manager) ReconnectAll(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	m.reconnectMu.Lock()
-	m.reconnectCancel = cancel
-	m.reconnectMu.Unlock()
-	defer func() {
-		m.reconnectMu.Lock()
-		if m.reconnectCancel != nil {
-			m.reconnectCancel = nil
-		}
-		m.reconnectMu.Unlock()
-	}()
+	m.bindLifecycleParent(ctx)
+	ctx, finish, ok := m.beginProducer(ctx)
+	if !ok {
+		return ErrManagerStopping
+	}
+	defer finish()
 
 	allConns, err := m.repo.ListAll(ctx)
 	if err != nil {
@@ -236,8 +241,15 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 		return fmt.Errorf("connect whatsapp client: %w", err)
 	}
 
-	// Create session with cancelable context only after a successful connection.
-	sessionCtx, cancel := context.WithCancel(ctx)
+	// A restored session belongs to the manager lifecycle, not to the finite
+	// ReconnectAll call. Otherwise a successful startup pass would immediately
+	// cancel every restored client when ReconnectAll returns.
+	sessionBaseCtx, finishSession, ok := m.beginProducer(context.Background())
+	if !ok {
+		wc.Disconnect()
+		return ErrManagerStopping
+	}
+	sessionCtx, cancel := context.WithCancel(sessionBaseCtx)
 
 	sess := &Session{
 		DeviceID: d.ID.String(),
@@ -251,10 +263,16 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 
 	// Register event handler to update recipient_sessions on incoming messages
 	wc.AddEventHandler(func(evt interface{}) {
+		eventCtx, finishEvent, ok := m.beginProducer(sessionCtx)
+		if !ok {
+			return
+		}
+		defer finishEvent()
+
 		switch v := evt.(type) {
 		case *waEvents.LoggedOut:
 			slog.Warn("session manager: whatsmeow logged out event received, marking device terminal", "device_id", d.ID)
-			if err := m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusTerminal)); err != nil {
+			if err := m.repo.UpdateStatus(eventCtx, d.ID, string(DeviceStatusTerminal)); err != nil && eventCtx.Err() == nil {
 				slog.Error("session manager: failed to mark device terminal", "error", err, "device_id", d.ID)
 			}
 			cancel()
@@ -264,8 +282,6 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 			}
 
 			senderJID := v.Info.Sender.String()
-			ctxBg := context.Background()
-
 			// Download media from WhatsApp CDN (needs active whatsmeow client)
 			var mediaBytes []byte
 			var mediaType string
@@ -274,7 +290,7 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 			hasMedia := false
 
 			if imageMsg := v.Message.GetImageMessage(); imageMsg != nil {
-				data, err := wc.Download(ctxBg, imageMsg)
+				data, err := wc.Download(eventCtx, imageMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -284,7 +300,7 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 					mediaCaption = *imageMsg.Caption
 				}
 			} else if docMsg := v.Message.GetDocumentMessage(); docMsg != nil {
-				data, err := wc.Download(ctxBg, docMsg)
+				data, err := wc.Download(eventCtx, docMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -297,14 +313,14 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 					mediaCaption = *docMsg.Caption
 				}
 			} else if audioMsg := v.Message.GetAudioMessage(); audioMsg != nil {
-				data, err := wc.Download(ctxBg, audioMsg)
+				data, err := wc.Download(eventCtx, audioMsg)
 				if err == nil {
 					mediaBytes = data
 				}
 				mediaType = "audio"
 				hasMedia = true
 			} else if videoMsg := v.Message.GetVideoMessage(); videoMsg != nil {
-				data, err := wc.Download(ctxBg, videoMsg)
+				data, err := wc.Download(eventCtx, videoMsg)
 				if err == nil {
 					mediaBytes = data
 				}
@@ -363,13 +379,14 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 					Contacts:     inboundContacts,
 				}
 
-				_ = m.inboundProcessor.Process(ctxBg, event)
+				_ = m.inboundProcessor.Process(eventCtx, event)
 			}
 		}
 	})
 
 	if err := m.repo.UpdateStatus(ctx, d.ID, string(DeviceStatusConnected)); err != nil {
 		cancel()
+		finishSession()
 		wc.Disconnect()
 		m.registry.Remove(jid)
 		return fmt.Errorf("mark device connected: %w", err)
@@ -377,9 +394,11 @@ func (m *Manager) reconnectDevice(ctx context.Context, d *repository.Connection)
 
 	// Wait for shutdown in a dedicated goroutine.
 	go func() {
+		defer finishSession()
 		wc.Wait(sessionCtx)
-		// Update status when goroutine exits
-		if err := m.repo.UpdateStatus(context.Background(), d.ID, string(DeviceStatusDisconnected)); err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), statusUpdateTimeout)
+		defer cleanupCancel()
+		if err := m.repo.UpdateStatus(cleanupCtx, d.ID, string(DeviceStatusDisconnected)); err != nil {
 			slog.Error("session manager: failed to mark stopped device disconnected", "error", err, "device_id", d.ID)
 		}
 		m.registry.Remove(jid)
@@ -418,13 +437,67 @@ func parseJID(jid string) (types.JID, error) {
 // StopAll gracefully stops all active sessions.
 func (m *Manager) StopAll() {
 	slog.Info("session manager: stopping all sessions", "count", m.registry.Len())
-	m.reconnectMu.Lock()
-	cancel := m.reconnectCancel
-	m.reconnectMu.Unlock()
+	m.lifecycleMu.Lock()
+	m.ensureLifecycleLocked()
+	m.stopping = true
+	cancel := m.lifecycleCancel
+	stopParent := m.stopParent
+	m.stopParent = nil
+	m.lifecycleMu.Unlock()
+	if stopParent != nil {
+		stopParent()
+	}
 	if cancel != nil {
 		cancel()
 	}
 	m.registry.StopAll()
+	m.producers.Wait()
+}
+
+func (m *Manager) beginProducer(parent context.Context) (context.Context, func(), bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
+
+	m.lifecycleMu.Lock()
+	m.ensureLifecycleLocked()
+	if m.stopping {
+		m.lifecycleMu.Unlock()
+		return nil, nil, false
+	}
+	producerCtx, cancel := context.WithCancel(m.lifecycleCtx)
+	stopParent := context.AfterFunc(parent, cancel)
+	m.producers.Add(1)
+	m.lifecycleMu.Unlock()
+
+	var finishOnce sync.Once
+	finish := func() {
+		finishOnce.Do(func() {
+			stopParent()
+			cancel()
+			m.producers.Done()
+		})
+	}
+	return producerCtx, finish, true
+}
+
+func (m *Manager) ensureLifecycleLocked() {
+	if m.lifecycleCtx == nil {
+		m.lifecycleCtx, m.lifecycleCancel = context.WithCancel(context.Background())
+	}
+}
+
+func (m *Manager) bindLifecycleParent(parent context.Context) {
+	if parent == nil {
+		return
+	}
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	m.ensureLifecycleLocked()
+	if m.stopping || m.stopParent != nil {
+		return
+	}
+	m.stopParent = context.AfterFunc(parent, m.lifecycleCancel)
 }
 
 // ActiveDevices returns a snapshot of all active sessions.

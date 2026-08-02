@@ -42,13 +42,13 @@ func getMigrationTestPool(t *testing.T) *pgxpool.Pool {
 
 func TestConnectionMigration(t *testing.T) {
 	pool := getMigrationTestPool(t)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	db, err := postgres.NewSQLDB(pool)
 	if err != nil {
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	t.Cleanup(func() { _ = db.Close() })
 
 	ctx := context.Background()
 	dir, err := filepath.Abs("../platform/postgres/migrations")
@@ -66,14 +66,20 @@ func TestConnectionMigration(t *testing.T) {
 
 	// Reset base FS to local OS filesystem to avoid side-effects from tests that set it to embed.FS
 	goose.SetBaseFS(nil)
+	t.Cleanup(func() {
+		goose.SetBaseFS(nil)
+		if err := goose.Up(db, dir); err != nil {
+			t.Errorf("restore latest schema after migration test: %v", err)
+		}
+	})
 
 	// Clean up existing migration test workspaces/devices/credentials to avoid conflicts
 	_, _ = db.ExecContext(ctx, "DELETE FROM audit_logs")
 	_, _ = db.ExecContext(ctx, "DELETE FROM waba_templates")
 	_, _ = db.ExecContext(ctx, "DELETE FROM recipient_sessions")
 	_, _ = db.ExecContext(ctx, "DELETE FROM message_dispatches")
-	_, _ = db.ExecContext(ctx, "DELETE FROM webhooks_dlq")
-	_, _ = db.ExecContext(ctx, "DELETE FROM webhooks")
+	_, _ = db.ExecContext(ctx, "DELETE FROM webhook_dlqs")
+	_, _ = db.ExecContext(ctx, "DELETE FROM webhook_subscriptions")
 	_, _ = db.ExecContext(ctx, "DELETE FROM api_keys")
 	_, _ = db.ExecContext(ctx, "DELETE FROM connections")
 	_, _ = db.ExecContext(ctx, "DELETE FROM devices")

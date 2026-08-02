@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/domain"
 	"github.com/pablojhp.pergo/internal/media"
+	"github.com/pablojhp.pergo/internal/platform/messagebus"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -197,8 +198,14 @@ func (p *Processor) ingest(
 			slog.Error("failed to marshal message", "error", err, "trace_id", traceID)
 			return nil, err
 		}
+		if len(payload) > messagebus.MaxPayloadBytes {
+			return nil, messagebus.ErrPayloadTooLarge
+		}
 
 		if err := p.publisher.Publish(ctx, "messages.outbound", payload, traceID); err != nil {
+			if errors.Is(err, messagebus.ErrWorkspaceQueueCapacity) {
+				return nil, ErrQueueFull
+			}
 			slog.Error("failed to publish message", "error", err, "trace_id", traceID)
 			return nil, err
 		}

@@ -113,6 +113,26 @@ func TestConnectionRepository(t *testing.T) {
 		t.Errorf("ProxyURL mismatch: got %v, want %q", retrieved.ProxyURL, proxyVal)
 	}
 
+	otherWS, err := wsRepo.Create(ctx, "conn_test_other_ws_"+uuid.New().String())
+	if err != nil {
+		t.Fatalf("failed to create second workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(context.Background(), otherWS.ID) }()
+	if _, err := repo.GetByIDForWorkspace(ctx, otherWS.ID, conn.ID); !errors.Is(err, repository.ErrConnectionNotFound) {
+		t.Fatalf("GetByIDForWorkspace cross-tenant error = %v, want ErrConnectionNotFound", err)
+	}
+	if _, err := repo.GetCredentialsForWorkspace(ctx, otherWS.ID, conn.ID); !errors.Is(err, repository.ErrConnectionNotFound) {
+		t.Fatalf("GetCredentialsForWorkspace cross-tenant error = %v, want ErrConnectionNotFound", err)
+	}
+	scoped, err := repo.GetByIDForWorkspace(ctx, ws.ID, conn.ID)
+	if err != nil || scoped.ID != conn.ID {
+		t.Fatalf("GetByIDForWorkspace owner lookup = (%v, %v)", scoped, err)
+	}
+	scopedCredentials, err := repo.GetCredentialsForWorkspace(ctx, ws.ID, conn.ID)
+	if err != nil || !bytes.Equal(scopedCredentials, conn.Credentials) {
+		t.Fatalf("GetCredentialsForWorkspace owner lookup = (%q, %v)", string(scopedCredentials), err)
+	}
+
 	// Verify encryption in DB (credentials should be encrypted, not plaintext)
 	var dbCredentials []byte
 	err = pool.QueryRow(ctx, "SELECT credentials FROM connections WHERE id = $1", conn.ID).Scan(&dbCredentials)
@@ -243,6 +263,38 @@ func TestConnectionRepository(t *testing.T) {
 	}
 	if !bytes.Equal(decryptedCreds, newSecret) {
 		t.Errorf("retrieved credentials mismatch: got %q, want %q", string(decryptedCreds), string(newSecret))
+	}
+	afterSave, err := repo.GetByID(ctx, conn.ID)
+	if err != nil {
+		t.Fatalf("reload after SaveCredentials: %v", err)
+	}
+	if afterSave.CredentialRevision != 1 {
+		t.Fatalf("credential revision = %d, want 1", afterSave.CredentialRevision)
+	}
+	casSecret := []byte("tenant-scoped-cas-secret")
+	if err := repo.SaveCredentialsForWorkspaceIfRevision(
+		ctx,
+		ws.ID,
+		conn.ID,
+		conn.Channel,
+		afterSave.CredentialRevision,
+		casSecret,
+	); err != nil {
+		t.Fatalf("CAS credential save: %v", err)
+	}
+	if err := repo.SaveCredentialsForWorkspaceIfRevision(
+		ctx,
+		ws.ID,
+		conn.ID,
+		conn.Channel,
+		afterSave.CredentialRevision,
+		[]byte("must-not-overwrite"),
+	); !errors.Is(err, repository.ErrCredentialsChanged) {
+		t.Fatalf("stale CAS error = %v, want ErrCredentialsChanged", err)
+	}
+	decryptedCreds, err = repo.GetCredentials(ctx, conn.ID)
+	if err != nil || !bytes.Equal(decryptedCreds, casSecret) {
+		t.Fatalf("stale CAS changed credentials: got %q err=%v", decryptedCreds, err)
 	}
 
 	// 10. Test Delete

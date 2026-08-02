@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/pablojhp.pergo/internal/channel"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/platform/storage"
 	"github.com/pablojhp.pergo/internal/repository"
@@ -73,12 +74,12 @@ func (a *TelegramAdapter) SetBaseURL(url string) {
 
 // Dispatch sends a message through the Telegram Bot API.
 func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayload) (string, error) {
-	_, err := tenant.RequireWorkspaceID(ctx)
+	workspaceID, err := tenant.RequireWorkspaceID(ctx)
 	if err != nil {
 		return "", channel.NewTerminalError(err)
 	}
 
-	credsBytes, err := a.connectionsRepo.GetCredentials(ctx, m.ConnectionID)
+	credsBytes, err := a.connectionsRepo.GetCredentialsForWorkspace(ctx, workspaceID, m.ConnectionID)
 	if err != nil {
 		if errors.Is(err, repository.ErrConnectionNotFound) {
 			return "", channel.NewTerminalError(fmt.Errorf("connection credentials not found: %w", err))
@@ -195,7 +196,7 @@ func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 		url := fmt.Sprintf("%s/bot%s/%s", a.baseURL, config.Token, endpoint)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &bodyBuf)
 		if err != nil {
-			return "", channel.NewTerminalError(fmt.Errorf("create HTTP request: %w", err))
+			return "", channel.NewTerminalError(errors.New("failed to create Telegram request"))
 		}
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -248,7 +249,7 @@ func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 	url := fmt.Sprintf("%s/bot%s/sendMessage", a.baseURL, config.Token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", channel.NewTerminalError(fmt.Errorf("create HTTP request: %w", err))
+		return "", channel.NewTerminalError(errors.New("failed to create Telegram request"))
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -258,39 +259,60 @@ func (a *TelegramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayloa
 func (a *TelegramAdapter) executeRequest(req *http.Request) (string, error) {
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", channel.NewUncertainError(fmt.Errorf("telegram transport response lost: %w", err))
+		// net/http transport errors may embed req.URL, whose path contains the
+		// bot token. Preserve uncertainty semantics without exposing the URL.
+		return "", channel.NewUncertainError(errors.New("telegram transport response lost"))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return "", channel.NewUncertainError(errors.New("telegram response body is invalid"))
+		}
+		return "", classifyTelegramHTTPStatus(resp.StatusCode, 0)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return string(respBytes), nil
+		var successResp struct {
+			OK     bool `json:"ok"`
+			Result struct {
+				MessageID json.Number `json:"message_id"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(respBytes, &successResp); err != nil ||
+			!successResp.OK ||
+			successResp.Result.MessageID.String() == "" ||
+			successResp.Result.MessageID.String() == "0" {
+			return "", channel.NewUncertainError(errors.New("telegram accepted request without a message ID"))
+		}
+		return successResp.Result.MessageID.String(), nil
 	}
 
 	var errorResp TelegramErrorResponse
 	if err := json.Unmarshal(respBytes, &errorResp); err != nil {
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return string(respBytes), channel.NewTerminalError(fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes)))
-		}
-		return string(respBytes), fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes))
+		return "", classifyTelegramHTTPStatus(resp.StatusCode, 0)
 	}
 
-	return string(respBytes), a.classifyError(resp.StatusCode, &errorResp)
+	return "", a.classifyError(resp.StatusCode, &errorResp)
 }
 
 func (a *TelegramAdapter) classifyError(statusCode int, errResp *TelegramErrorResponse) error {
-	err := fmt.Errorf("telegram API error (code: %d): %s", errResp.ErrorCode, errResp.Description)
+	return classifyTelegramHTTPStatus(statusCode, errResp.ErrorCode)
+}
+
+func classifyTelegramHTTPStatus(statusCode int, apiCode int) error {
+	err := fmt.Errorf("telegram API error (http_status=%d, code=%d)", statusCode, apiCode)
 
 	// Explicit check based on known Telegram error codes
 	// 400: Bad Request (chat not found, etc.)
 	// 401: Unauthorized (invalid token)
 	// 403: Forbidden (bot blocked by user, etc.)
-	if errResp.ErrorCode == 400 || errResp.ErrorCode == 401 || errResp.ErrorCode == 403 {
+	if apiCode == 400 || apiCode == 401 || apiCode == 403 {
 		return channel.NewTerminalError(err)
 	}
 
 	// 429: Too Many Requests (Rate limit hit)
-	if errResp.ErrorCode == 429 {
+	if apiCode == 429 {
 		return err
 	}
 

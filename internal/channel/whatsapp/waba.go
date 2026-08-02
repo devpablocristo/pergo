@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/channel"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/repository"
 )
@@ -35,6 +37,49 @@ type WABAConfig struct {
 	Token         string `json:"token"`
 	WABAAccountID string `json:"waba_account_id"`
 	VerifyToken   string `json:"verify_token"`
+	AppSecret     string `json:"app_secret"`
+}
+
+// ValidateWebhookSecrets applies the minimum policy used by both interactive
+// onboarding and the production rotation job. It never includes a submitted
+// secret in returned errors.
+func ValidateWebhookSecrets(appSecret, verifyToken string) error {
+	if err := ValidateAppSecret(appSecret); err != nil {
+		return err
+	}
+	return ValidateVerifyToken(verifyToken)
+}
+
+// ValidateAppSecret rejects missing and obviously synthetic Meta application
+// secrets without returning the submitted value.
+func ValidateAppSecret(appSecret string) error {
+	if !acceptableWABASecret(appSecret, "") {
+		return errors.New("app_secret must be a non-trivial value of at least 32 characters")
+	}
+	return nil
+}
+
+// ValidateVerifyToken rejects predictable or trivial callback tokens.
+func ValidateVerifyToken(verifyToken string) error {
+	if !acceptableWABASecret(verifyToken, "pergo_verify_token_") {
+		return errors.New("verify_token must be a randomly generated value of at least 32 characters")
+	}
+	return nil
+}
+
+func acceptableWABASecret(value, forbiddenPrefix string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 32 || (forbiddenPrefix != "" && strings.HasPrefix(value, forbiddenPrefix)) {
+		return false
+	}
+	allSame := true
+	for i := 1; i < len(value); i++ {
+		if value[i] != value[0] {
+			allSame = false
+			break
+		}
+	}
+	return !allSame
 }
 
 type wabaMessageRequest struct {
@@ -138,7 +183,7 @@ func NewWABAAdapter(connectionsRepo *repository.ConnectionRepository, client *ht
 	return &WABAAdapter{
 		connectionsRepo: connectionsRepo,
 		client:          client,
-		baseURL:         "https://graph.facebook.com/v18.0",
+		baseURL:         metaapi.BaseURL(metaapi.DefaultVersion),
 		windowChecker:   windowChecker,
 		externalBaseURL: externalBaseURL,
 	}
@@ -156,7 +201,7 @@ func (a *WABAAdapter) Dispatch(ctx context.Context, m *channel.MessagePayload) (
 		return "", channel.NewTerminalError(err)
 	}
 
-	conn, err := a.connectionsRepo.GetByID(ctx, m.ConnectionID)
+	conn, err := a.connectionsRepo.GetByIDForWorkspace(ctx, workspaceID, m.ConnectionID)
 	if err != nil {
 		if errors.Is(err, repository.ErrConnectionNotFound) {
 			return "", channel.NewTerminalError(fmt.Errorf("connection credentials not found: %w", err))
@@ -488,7 +533,7 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 	url := fmt.Sprintf("%s/%s/messages", a.baseURL, phoneNumberID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", channel.NewTerminalError(fmt.Errorf("create HTTP request: %w", err))
+		return "", channel.NewTerminalError(errors.New("failed to create Meta request"))
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -496,11 +541,17 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", channel.NewUncertainError(fmt.Errorf("meta transport response lost: %w", err))
+		return "", channel.NewUncertainError(errors.New("meta transport response lost"))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return "", channel.NewUncertainError(errors.New("meta response body is invalid"))
+		}
+		return "", classifyWABAHTTPStatus(resp.StatusCode, 0, 0)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var successResp struct {
 			Messages []struct {
@@ -510,33 +561,39 @@ func (a *WABAAdapter) sendRequest(ctx context.Context, phoneNumberID, token stri
 		if err := json.Unmarshal(respBytes, &successResp); err == nil && len(successResp.Messages) > 0 && successResp.Messages[0].ID != "" {
 			return successResp.Messages[0].ID, nil
 		}
-		return string(respBytes), nil
+		return "", channel.NewUncertainError(errors.New("meta accepted request without a message ID"))
 	}
 
 	var errorResp MetaErrorResponse
 	if err := json.Unmarshal(respBytes, &errorResp); err != nil {
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return string(respBytes), channel.NewTerminalError(fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes)))
-		}
-		return string(respBytes), fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes))
+		return "", classifyWABAHTTPStatus(resp.StatusCode, 0, 0)
 	}
 
-	return string(respBytes), a.classifyError(resp.StatusCode, &errorResp)
+	return "", a.classifyError(resp.StatusCode, &errorResp)
 }
 
 func (a *WABAAdapter) classifyError(statusCode int, errResp *MetaErrorResponse) error {
 	metaErr := errResp.Error
-	err := fmt.Errorf("meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
+	return classifyWABAHTTPStatus(statusCode, metaErr.Code, metaErr.ErrorSubcode)
+}
 
-	if metaErr.Code == 131030 ||
-		metaErr.Code == 131047 ||
-		metaErr.Code == 132000 ||
-		metaErr.Code == 190 ||
-		(metaErr.Code == 100 && metaErr.ErrorSubcode == 33) {
+func classifyWABAHTTPStatus(statusCode int, code int, subcode int) error {
+	err := fmt.Errorf(
+		"meta API error (http_status=%d, code=%d, subcode=%d)",
+		statusCode,
+		code,
+		subcode,
+	)
+
+	if code == 131030 ||
+		code == 131047 ||
+		code == 132000 ||
+		code == 190 ||
+		(code == 100 && subcode == 33) {
 		return channel.NewTerminalError(err)
 	}
 
-	if metaErr.Code == 130429 || metaErr.Code == 131052 {
+	if code == 130429 || code == 131052 {
 		return err
 	}
 

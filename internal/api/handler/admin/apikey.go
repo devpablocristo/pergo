@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -80,7 +81,7 @@ func (h *APIKeyHandler) ConfirmRevoke(c *echo.Context) error {
 		return c.String(http.StatusBadRequest, "invalid key ID")
 	}
 
-	key, err := h.Repo.GetByID(c.Request().Context(), keyID)
+	key, err := h.Repo.GetByIDForWorkspace(c.Request().Context(), workspaceID, keyID)
 	if err != nil {
 		return c.String(http.StatusNotFound, "API key not found")
 	}
@@ -90,6 +91,15 @@ func (h *APIKeyHandler) ConfirmRevoke(c *echo.Context) error {
 
 // Revoke revokes an API key and returns a fragment with the revoked badge.
 func (h *APIKeyHandler) Revoke(c *echo.Context) error {
+	idStr, err := echo.PathParam[string](c, "id")
+	if err != nil {
+		return c.String(http.StatusBadRequest, "invalid workspace ID")
+	}
+	workspaceID, err := uuid.Parse(idStr)
+	if err != nil {
+		return c.String(http.StatusBadRequest, "invalid workspace ID")
+	}
+
 	keyIdStr, err := echo.PathParam[string](c, "key_id")
 	if err != nil {
 		return c.String(http.StatusBadRequest, "invalid key ID")
@@ -99,14 +109,15 @@ func (h *APIKeyHandler) Revoke(c *echo.Context) error {
 		return c.String(http.StatusBadRequest, "invalid key ID")
 	}
 
-	if err := h.Repo.Revoke(c.Request().Context(), keyID); err != nil {
+	if err := h.Repo.RevokeForWorkspace(c.Request().Context(), workspaceID, keyID); err != nil {
+		if errors.Is(err, repository.ErrAPIKeyNotFound) {
+			return c.String(http.StatusNotFound, "API key not found")
+		}
 		return c.String(http.StatusInternalServerError, "failed to revoke API key")
 	}
 
 	// Return a simple revoked row — HTMX will swap the original row
-	idStr, _ := echo.PathParam[string](c, "id")
-	workspaceID, _ := uuid.Parse(idStr)
-	key, err := h.Repo.GetByID(c.Request().Context(), keyID)
+	key, err := h.Repo.GetByIDForWorkspace(c.Request().Context(), workspaceID, keyID)
 	if err != nil {
 		// Key was revoked but we can't fetch it — return minimal response
 		return c.HTML(http.StatusOK, `<tr><td colspan="5"><span class="badge badge-danger">Revoked</span></td></tr>`)

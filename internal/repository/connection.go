@@ -16,23 +16,28 @@ import (
 // ErrConnectionNotFound is returned when a connection cannot be found.
 var ErrConnectionNotFound = errors.New("connection not found")
 
+// ErrCredentialsChanged prevents read-modify-write operations from overwriting
+// a newer provider token or credential update.
+var ErrCredentialsChanged = errors.New("connection credentials changed concurrently")
+
 // Connection represents a unified channel connection instance.
 type Connection struct {
-	ID             uuid.UUID  `json:"id"`
-	WorkspaceID    uuid.UUID  `json:"workspace_id"`
-	Name           string     `json:"name"`
-	Channel        string     `json:"channel"`
-	SenderIdentity string     `json:"sender_identity"`
-	Status         string     `json:"status"`
-	IsDefault      bool       `json:"is_default"`
-	Credentials    []byte     `json:"credentials,omitempty"`
-	KeyID          string     `json:"key_id,omitempty"`
-	KeyVersion     int        `json:"key_version,omitempty"`
-	JID            *string    `json:"jid,omitempty"`
-	ConnectedSince *time.Time `json:"connected_since,omitempty"`
-	ProxyURL       *string    `json:"proxy_url,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                 uuid.UUID  `json:"id"`
+	WorkspaceID        uuid.UUID  `json:"workspace_id"`
+	Name               string     `json:"name"`
+	Channel            string     `json:"channel"`
+	SenderIdentity     string     `json:"sender_identity"`
+	Status             string     `json:"status"`
+	IsDefault          bool       `json:"is_default"`
+	Credentials        []byte     `json:"credentials,omitempty"`
+	KeyID              string     `json:"key_id,omitempty"`
+	KeyVersion         int        `json:"key_version,omitempty"`
+	CredentialRevision int64      `json:"-"`
+	JID                *string    `json:"jid,omitempty"`
+	ConnectedSince     *time.Time `json:"connected_since,omitempty"`
+	ProxyURL           *string    `json:"proxy_url,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // ConnectionRepository manages CRUD operations and credentials crypto for Connection.
@@ -103,7 +108,7 @@ func (r *ConnectionRepository) Create(ctx context.Context, c *Connection) error 
 func (r *ConnectionRepository) GetByID(ctx context.Context, id uuid.UUID) (*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		WHERE id = $1
 	`
@@ -111,11 +116,25 @@ func (r *ConnectionRepository) GetByID(ctx context.Context, id uuid.UUID) (*Conn
 	return r.scanAndDecrypt(row)
 }
 
+// GetByIDForWorkspace retrieves a connection only when both the opaque ID and
+// tenant boundary match. Provider adapters must use this method for queue
+// payloads because broker messages are not an authorization boundary.
+func (r *ConnectionRepository) GetByIDForWorkspace(ctx context.Context, workspaceID, id uuid.UUID) (*Connection, error) {
+	query := `
+		SELECT id, workspace_id, name, channel, sender_identity, status, is_default,
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
+		FROM connections
+		WHERE workspace_id = $1 AND id = $2
+	`
+	row := r.pool.QueryRow(ctx, query, workspaceID, id)
+	return r.scanAndDecrypt(row)
+}
+
 // GetBySenderIdentity retrieves a connection by sender identity, decrypting credentials if present.
 func (r *ConnectionRepository) GetBySenderIdentity(ctx context.Context, workspaceID uuid.UUID, senderIdentity string) (*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		WHERE workspace_id = $1 AND sender_identity = $2
 	`
@@ -127,7 +146,7 @@ func (r *ConnectionRepository) GetBySenderIdentity(ctx context.Context, workspac
 func (r *ConnectionRepository) GetByJID(ctx context.Context, jid string) (*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		WHERE jid = $1
 	`
@@ -139,7 +158,7 @@ func (r *ConnectionRepository) GetByJID(ctx context.Context, jid string) (*Conne
 func (r *ConnectionRepository) GetDefaultChannelConnection(ctx context.Context, workspaceID uuid.UUID, channel string) (*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		WHERE workspace_id = $1 AND channel = $2 AND is_default = TRUE
 	`
@@ -151,7 +170,7 @@ func (r *ConnectionRepository) GetDefaultChannelConnection(ctx context.Context, 
 func (r *ConnectionRepository) ListByWorkspace(ctx context.Context, workspaceID uuid.UUID) ([]*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		WHERE workspace_id = $1
 		ORDER BY created_at
@@ -177,7 +196,7 @@ func (r *ConnectionRepository) ListByWorkspace(ctx context.Context, workspaceID 
 func (r *ConnectionRepository) ListAll(ctx context.Context) ([]*Connection, error) {
 	query := `
 		SELECT id, workspace_id, name, channel, sender_identity, status, is_default, 
-		       credentials, key_id, key_version, jid, connected_since, proxy_url, created_at, updated_at
+		       credentials, key_id, key_version, credential_revision, jid, connected_since, proxy_url, created_at, updated_at
 		FROM connections
 		ORDER BY created_at
 	`
@@ -245,24 +264,79 @@ func (r *ConnectionRepository) SaveCredentials(ctx context.Context, id uuid.UUID
 		return fmt.Errorf("failed to encrypt credentials: %w", err)
 	}
 
-	_, err = r.pool.Exec(ctx, `
+	result, err := r.pool.Exec(ctx, `
 		UPDATE connections 
-		SET credentials = $2, key_id = $3, key_version = $4, updated_at = NOW()
+		SET credentials = $2, key_id = $3, key_version = $4,
+		    credential_revision = credential_revision + 1, updated_at = NOW()
 		WHERE id = $1
 	`, id, ciphertext, keyID, keyVersion)
-	return err
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrConnectionNotFound
+	}
+	return nil
+}
+
+// SaveCredentialsForWorkspaceIfRevision performs an optimistic, tenant- and
+// channel-scoped credential replacement. It refuses to overwrite credentials
+// changed after the caller read them.
+func (r *ConnectionRepository) SaveCredentialsForWorkspaceIfRevision(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	id uuid.UUID,
+	channel string,
+	expectedRevision int64,
+	plaintext []byte,
+) error {
+	if len(plaintext) == 0 {
+		return errors.New("credentials payload cannot be empty")
+	}
+	ciphertext, keyID, keyVersion, err := r.provider.Encrypt(plaintext)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt credentials: %w", err)
+	}
+	result, err := r.pool.Exec(ctx, `
+		UPDATE connections
+		SET credentials = $5, key_id = $6, key_version = $7,
+		    credential_revision = credential_revision + 1, updated_at = NOW()
+		WHERE id = $1 AND workspace_id = $2 AND channel = $3
+		  AND credential_revision = $4
+	`, id, workspaceID, channel, expectedRevision, ciphertext, keyID, keyVersion)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrCredentialsChanged
+	}
+	return nil
 }
 
 // GetCredentials retrieves and decrypts the credentials for a connection.
 func (r *ConnectionRepository) GetCredentials(ctx context.Context, id uuid.UUID) ([]byte, error) {
+	return r.getCredentials(ctx,
+		`SELECT credentials, key_id, key_version FROM connections WHERE id = $1`,
+		id,
+	)
+}
+
+// GetCredentialsForWorkspace decrypts credentials only when the connection
+// belongs to the workspace carried by the trusted processing context.
+func (r *ConnectionRepository) GetCredentialsForWorkspace(ctx context.Context, workspaceID, id uuid.UUID) ([]byte, error) {
+	return r.getCredentials(ctx,
+		`SELECT credentials, key_id, key_version FROM connections WHERE workspace_id = $1 AND id = $2`,
+		workspaceID,
+		id,
+	)
+}
+
+func (r *ConnectionRepository) getCredentials(ctx context.Context, query string, args ...any) ([]byte, error) {
 	var ciphertext []byte
 	var keyID string
 	var keyVersion int
 
-	err := r.pool.QueryRow(ctx,
-		`SELECT credentials, key_id, key_version FROM connections WHERE id = $1`,
-		id,
-	).Scan(&ciphertext, &keyID, &keyVersion)
+	err := r.pool.QueryRow(ctx, query, args...).Scan(&ciphertext, &keyID, &keyVersion)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrConnectionNotFound
@@ -288,7 +362,7 @@ func (r *ConnectionRepository) scanAndDecrypt(row pgx.Row) (*Connection, error) 
 
 	err := row.Scan(
 		&c.ID, &c.WorkspaceID, &c.Name, &c.Channel, &c.SenderIdentity, &c.Status, &c.IsDefault,
-		&ciphertext, &keyID, &keyVersion, &jid, &connectedSince, &proxyURL, &c.CreatedAt, &c.UpdatedAt,
+		&ciphertext, &keyID, &keyVersion, &c.CredentialRevision, &jid, &connectedSince, &proxyURL, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -333,7 +407,7 @@ func (r *ConnectionRepository) scanRowAndDecrypt(rows pgx.Rows) (*Connection, er
 
 	err := rows.Scan(
 		&c.ID, &c.WorkspaceID, &c.Name, &c.Channel, &c.SenderIdentity, &c.Status, &c.IsDefault,
-		&ciphertext, &keyID, &keyVersion, &jid, &connectedSince, &proxyURL, &c.CreatedAt, &c.UpdatedAt,
+		&ciphertext, &keyID, &keyVersion, &c.CredentialRevision, &jid, &connectedSince, &proxyURL, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err

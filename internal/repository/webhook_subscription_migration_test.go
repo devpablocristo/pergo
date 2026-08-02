@@ -13,13 +13,13 @@ import (
 
 func TestWebhookSubscriptionMigration(t *testing.T) {
 	pool := getMigrationTestPool(t)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	db, err := postgres.NewSQLDB(pool)
 	if err != nil {
 		t.Fatalf("failed to wrap pool as sql.DB: %v", err)
 	}
-	defer func() { _ = db.Close() }()
+	t.Cleanup(func() { _ = db.Close() })
 
 	ctx := context.Background()
 	dir, err := filepath.Abs("../platform/postgres/migrations")
@@ -31,6 +31,12 @@ func TestWebhookSubscriptionMigration(t *testing.T) {
 		t.Fatalf("failed to set goose dialect: %v", err)
 	}
 	goose.SetBaseFS(nil)
+	t.Cleanup(func() {
+		goose.SetBaseFS(nil)
+		if err := goose.Up(db, dir); err != nil {
+			t.Errorf("restore latest schema after migration test: %v", err)
+		}
+	})
 
 	// Clean up tables
 	_, _ = db.ExecContext(ctx, "DELETE FROM webhook_dlqs")
@@ -109,7 +115,8 @@ func TestWebhookSubscriptionMigration(t *testing.T) {
 		t.Errorf("expected URL 'https://old.url', got '%s'", restoredURL)
 	}
 
-	// 5. Migrate back Up to 23 to leave the database clean
+	// 5. Migrate back Up to 23 to verify migration repeatability. Cleanup
+	// restores the current repository head so later packages are isolated.
 	if err := goose.UpTo(db, dir, 23); err != nil {
 		t.Fatalf("failed to migrate back Up to 23: %v", err)
 	}

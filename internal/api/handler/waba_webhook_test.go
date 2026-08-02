@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pablojhp.pergo/internal/inbound"
 	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/platform/audit"
@@ -40,15 +39,8 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 	nc := connectNATS(t)
 	ctx := context.Background()
 
-	// Setup NATS Stream
-	js, err := jetstream.New(nc)
-	if err == nil {
-		_ = js.DeleteStream(ctx, "INBOUND")
-	}
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     "INBOUND",
-		Subjects: []string{"inbound.events.>"},
-	})
+	// Provision the same versioned, workspace-scoped stream used by runtime.
+	_, err := queue.EnsureInboundStream(ctx, nc)
 	if err != nil {
 		t.Fatalf("failed to create NATS stream: %v", err)
 	}
@@ -82,9 +74,16 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 		t.Fatalf("failed to update workspace: %v", err)
 	}
 
+	const (
+		verifyToken = "Fqg5Z1wPx6eMc8Rk4nY2sV9jL7tB3hDd"
+		appSecret   = "meta-app-secret-for-handler-test"
+		phoneID     = "phone-number-id-handler-test"
+	)
 	configPayload := map[string]string{
-		"verify_token": "my-waba-verify-token",
-		"token":        "waba-test-token",
+		"phone_number_id": phoneID,
+		"verify_token":    verifyToken,
+		"app_secret":      appSecret,
+		"token":           "waba-test-token",
 	}
 	configBytes, _ := json.Marshal(configPayload)
 	conn := &repository.Connection{
@@ -108,7 +107,7 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 	e := echo.New()
 
 	t.Run("GET Verification challenge success", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/webhooks/waba/%s?hub.verify_token=my-waba-verify-token&hub.challenge=test_challenge_123", ws.ID), nil)
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/webhooks/waba/%s?hub.verify_token=%s&hub.challenge=test_challenge_123", ws.ID, verifyToken), nil)
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
 		c.SetPath("/webhooks/waba/:workspace_id")
@@ -137,6 +136,10 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 							"field": "messages",
 							"value": {
 								"messaging_product": "whatsapp",
+								"metadata": {
+									"display_phone_number": "15550001111",
+									"phone_number_id": "` + phoneID + `"
+								},
 								"messages": [
 									{
 										"from": "5511999999999",
@@ -157,6 +160,7 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/webhooks/waba/%s", ws.ID), strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Hub-Signature-256", signedWABAHeader([]byte(body), appSecret))
 		rec := httptest.NewRecorder()
 		c := e.NewContext(req, rec)
 		c.SetPath("/webhooks/waba/:workspace_id")
@@ -173,6 +177,7 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 		// Replay duplicate should skip and return 200
 		req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/webhooks/waba/%s", ws.ID), strings.NewReader(body))
 		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("X-Hub-Signature-256", signedWABAHeader([]byte(body), appSecret))
 		rec2 := httptest.NewRecorder()
 		c2 := e.NewContext(req2, rec2)
 		c2.SetPath("/webhooks/waba/:workspace_id")

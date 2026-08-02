@@ -55,6 +55,22 @@ jobs:
           PERGO_NATS_URL: nats://localhost:4222
         run: go test ./... -race -count=1 -p 1 -coverprofile=coverage.out
 
+      - name: Enforce production runtime policy
+        run: go test ./internal/config -run 'TestValidateProductionPolicy|TestValidateRejectsUnsafeDeploymentKEKs|TestValidateRejectsMalformedKEKInDevelopment' -count=1
+
+      - name: Build runtime profiles
+        run: go build ./cmd/pergo
+
+      - name: Validate production container policy
+        run: |
+          grep -Fx '.env' .dockerignore
+          grep -Fx '.git' .dockerignore
+          if make prod; then
+            echo "make prod must fail closed"
+            exit 1
+          fi
+          docker build --tag pergo-ci .
+
       - name: Report coverage
         run: go tool cover -func=coverage.out
 

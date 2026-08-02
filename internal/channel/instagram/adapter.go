@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/pablojhp.pergo/internal/channel"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
 	"github.com/pablojhp.pergo/internal/repository"
 )
@@ -107,19 +108,24 @@ func NewAdapter(connectionsRepo *repository.ConnectionRepository, client *http.C
 	return &InstagramAdapter{
 		connectionsRepo: connectionsRepo,
 		client:          client,
-		baseURL:         "https://graph.facebook.com/v18.0",
+		baseURL:         metaapi.BaseURL(metaapi.DefaultVersion),
 		externalBaseURL: externalBaseURL,
 	}
 }
 
+// SetBaseURL overrides the versioned Meta Graph API URL.
+func (a *InstagramAdapter) SetBaseURL(url string) {
+	a.baseURL = url
+}
+
 // Dispatch sends a message through the Instagram REST API.
 func (a *InstagramAdapter) Dispatch(ctx context.Context, m *channel.MessagePayload) (string, error) {
-	_, err := tenant.RequireWorkspaceID(ctx)
+	workspaceID, err := tenant.RequireWorkspaceID(ctx)
 	if err != nil {
 		return "", channel.NewTerminalError(err)
 	}
 
-	conn, err := a.connectionsRepo.GetByID(ctx, m.ConnectionID)
+	conn, err := a.connectionsRepo.GetByIDForWorkspace(ctx, workspaceID, m.ConnectionID)
 	if err != nil {
 		if errors.Is(err, repository.ErrConnectionNotFound) {
 			return "", channel.NewTerminalError(fmt.Errorf("connection credentials not found: %w", err))
@@ -211,7 +217,7 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 	url := fmt.Sprintf("%s/%s/messages", a.baseURL, accountID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", channel.NewTerminalError(fmt.Errorf("create HTTP request: %w", err))
+		return "", channel.NewTerminalError(errors.New("failed to create Instagram request"))
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -219,11 +225,17 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return "", channel.NewUncertainError(fmt.Errorf("instagram transport response lost: %w", err))
+		return "", channel.NewUncertainError(errors.New("instagram transport response lost"))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return "", channel.NewUncertainError(errors.New("instagram response body is invalid"))
+		}
+		return "", classifyInstagramHTTPStatus(resp.StatusCode, 0, 0)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var successResp struct {
 			MessageID string `json:"message_id"`
@@ -231,24 +243,29 @@ func (a *InstagramAdapter) sendRequest(ctx context.Context, accountID, token str
 		if err := json.Unmarshal(respBytes, &successResp); err == nil && successResp.MessageID != "" {
 			return successResp.MessageID, nil
 		}
-		return string(respBytes), nil
+		return "", channel.NewUncertainError(errors.New("instagram accepted request without a message ID"))
 	}
 
 	var errorResp MetaErrorResponse
 	if err := json.Unmarshal(respBytes, &errorResp); err != nil {
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return string(respBytes), channel.NewTerminalError(fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes)))
-		}
-		return string(respBytes), fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBytes))
+		return "", classifyInstagramHTTPStatus(resp.StatusCode, 0, 0)
 	}
 
-	return string(respBytes), a.classifyError(resp.StatusCode, &errorResp)
+	return "", a.classifyError(resp.StatusCode, &errorResp)
 }
 
 func (a *InstagramAdapter) classifyError(statusCode int, errResp *MetaErrorResponse) error {
 	metaErr := errResp.Error
-	err := fmt.Errorf("meta API error (code: %d, subcode: %d): %s", metaErr.Code, metaErr.ErrorSubcode, metaErr.Message)
+	return classifyInstagramHTTPStatus(statusCode, metaErr.Code, metaErr.ErrorSubcode)
+}
 
+func classifyInstagramHTTPStatus(statusCode int, code int, subcode int) error {
+	err := fmt.Errorf(
+		"instagram API error (http_status=%d, code=%d, subcode=%d)",
+		statusCode,
+		code,
+		subcode,
+	)
 	if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
 		return err
 	}

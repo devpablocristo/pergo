@@ -107,15 +107,6 @@ type InboundEventPayload struct {
 	Story       *InboundStoryEvent  `json:"story_event,omitempty"`
 }
 
-// MessageStatusUpdatedPayload is the structure of the message status update event published to NATS.
-type MessageStatusUpdatedPayload struct {
-	WorkspaceID string `json:"workspace_id"`
-	DispatchID  string `json:"dispatch_id"`
-	MessageID   string `json:"message_id"` // Provider-specific unique message ID (e.g. wamid)
-	Status      string `json:"status"`     // e.g. "sent", "delivered", "read", "failed"
-	Timestamp   string `json:"timestamp"`
-}
-
 // DeliveryEventPayload is the canonical contract consumed by webhook
 // subscribers such as Pymes.
 type DeliveryEventPayload struct {
@@ -193,62 +184,138 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		dispatch, err := p.dispatchRepo.GetByProviderMessageID(ctx, ev.WorkspaceID, ev.MessageID)
 		if err != nil {
 			if errors.Is(err, repository.ErrDispatchNotFound) {
-				slog.Warn("inbound processor: dispatch not found for status update", "provider_message_id", ev.MessageID)
-				return nil
+				return fmt.Errorf(
+					"inbound processor: provider receipt arrived before dispatch persistence: %w",
+					repository.ErrDispatchNotFound,
+				)
 			}
 			return fmt.Errorf("inbound processor: failed to get dispatch by provider message ID: %w", err)
 		}
 
-		err = p.dispatchRepo.UpdateDispatchStatus(ctx, dispatch.ID, ev.Body, dispatch.CurrentChannel, dispatch.FallbackIndex, nil)
+		if !isCanonicalDeliveryStatus(ev.Body) {
+			return nil
+		}
+
+		messageID := dispatch.ID
+		if dispatch.ReceiptID != nil && *dispatch.ReceiptID != uuid.Nil {
+			messageID = *dispatch.ReceiptID
+		}
+		eventKey := dispatch.TraceID + ".delivery." + ev.Body
+		deliveryData, marshalErr := json.Marshal(DeliveryEventPayload{
+			Event:       ev.Body,
+			TraceID:     dispatch.TraceID,
+			MessageID:   messageID.String(),
+			Channel:     dispatch.CurrentChannel,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+			WorkspaceID: dispatch.WorkspaceID.String(),
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("inbound processor: failed to marshal delivery event: %w", marshalErr)
+		}
+		outboxEvent, err := p.dispatchRepo.RecordProviderDeliveryReceipt(
+			ctx,
+			dispatch.WorkspaceID,
+			dispatch.ID,
+			ev.Body,
+			eventKey,
+			deliveryData,
+		)
 		if err != nil {
-			return fmt.Errorf("inbound processor: failed to update dispatch status: %w", err)
+			return fmt.Errorf("inbound processor: failed to record delivery receipt: %w", err)
 		}
-
-		if p.publisher != nil {
-			timestamp := time.Now().UTC().Format(time.RFC3339)
-			payload := MessageStatusUpdatedPayload{
-				WorkspaceID: dispatch.WorkspaceID.String(),
-				DispatchID:  dispatch.ID.String(),
-				MessageID:   ev.MessageID,
-				Status:      ev.Body,
-				Timestamp:   timestamp,
-			}
-			eventData, err := json.Marshal(payload)
-			if err != nil {
-				return fmt.Errorf("inbound processor: failed to marshal status update payload: %w", err)
-			}
-			err = p.publisher.Publish(ctx, "messages.status_updated", eventData, dispatch.TraceID+".status."+ev.Body)
-			if err != nil {
-				return fmt.Errorf("inbound processor: failed to publish status update to NATS: %w", err)
-			}
-
-			if isCanonicalDeliveryStatus(ev.Body) {
-				messageID := dispatch.ID
-				if dispatch.ReceiptID != nil && *dispatch.ReceiptID != uuid.Nil {
-					messageID = *dispatch.ReceiptID
-				}
-				delivery := DeliveryEventPayload{
-					Event:       ev.Body,
-					TraceID:     dispatch.TraceID,
-					MessageID:   messageID.String(),
-					Channel:     dispatch.CurrentChannel,
-					Timestamp:   timestamp,
-					WorkspaceID: dispatch.WorkspaceID.String(),
-				}
-				deliveryData, marshalErr := json.Marshal(delivery)
-				if marshalErr != nil {
-					return fmt.Errorf("inbound processor: failed to marshal delivery event: %w", marshalErr)
-				}
-				if publishErr := p.publisher.Publish(
-					ctx,
-					"webhooks.events",
-					deliveryData,
-					dispatch.TraceID+".delivery."+ev.Body,
-				); publishErr != nil {
-					return fmt.Errorf("inbound processor: failed to publish delivery event: %w", publishErr)
-				}
-			}
+		if outboxEvent == nil || outboxEvent.PublishedAt != nil || p.publisher == nil {
+			return nil
 		}
+		if publishErr := p.publisher.Publish(
+			ctx,
+			"webhooks.events",
+			outboxEvent.Payload,
+			outboxEvent.EventKey,
+		); publishErr != nil {
+			return fmt.Errorf("inbound processor: failed to publish delivery event: %w", publishErr)
+		}
+		if err := p.dispatchRepo.MarkProviderDeliveryEventPublished(ctx, outboxEvent.ID); err != nil {
+			return fmt.Errorf("inbound processor: failed to complete delivery event: %w", err)
+		}
+		return nil
+	}
+
+	traceID := uuid.NewString()
+	var inboundClaim *repository.InboundClaim
+	claimCompleted := false
+	if p.dedupRepo != nil && ev.MessageID != "" {
+		claim, replay, retryAfter, err := p.dedupRepo.Claim(
+			ctx,
+			ev.WorkspaceID,
+			ev.ConnectionID,
+			ev.Channel,
+			ev.MessageID,
+			0,
+		)
+		if err != nil {
+			if errors.Is(err, repository.ErrInboundClaimActive) {
+				return fmt.Errorf(
+					"inbound: durable handoff is active; retry after %s: %w",
+					retryAfter,
+					err,
+				)
+			}
+			return fmt.Errorf("inbound: acquire durable handoff: %w", err)
+		}
+		if replay {
+			slog.Info(
+				"inbound processor: published duplicate ignored",
+				"message_id",
+				ev.MessageID,
+				"channel",
+				ev.Channel,
+			)
+			return nil
+		}
+		traceID = claim.TraceID
+		inboundClaim = &claim
+		defer func() {
+			if claimCompleted {
+				return
+			}
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := p.dedupRepo.Release(
+				releaseCtx,
+				ev.WorkspaceID,
+				ev.ConnectionID,
+				ev.Channel,
+				ev.MessageID,
+				claim,
+			); err != nil && !errors.Is(err, repository.ErrInboundClaimLost) {
+				slog.Error(
+					"inbound processor: failed to release durable handoff claim",
+					"error",
+					err,
+					"workspace_id",
+					ev.WorkspaceID.String(),
+					"channel",
+					ev.Channel,
+				)
+			}
+		}()
+	}
+
+	completeClaim := func() error {
+		if inboundClaim == nil {
+			return nil
+		}
+		if err := p.dedupRepo.MarkPublished(
+			ctx,
+			ev.WorkspaceID,
+			ev.ConnectionID,
+			ev.Channel,
+			ev.MessageID,
+			*inboundClaim,
+		); err != nil {
+			return fmt.Errorf("inbound: complete durable handoff: %w", err)
+		}
+		claimCompleted = true
 		return nil
 	}
 
@@ -291,18 +358,6 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		}
 	}
 
-	// 2. Deduplication check
-	if p.dedupRepo != nil && ev.MessageID != "" {
-		unique, err := p.dedupRepo.InsertAndCheck(ctx, ev.WorkspaceID, ev.Channel, ev.MessageID)
-		if err != nil {
-			return fmt.Errorf("inbound: deduplication check failed: %w", err)
-		}
-		if !unique {
-			slog.Info("inbound processor: duplicate message ignored", "message_id", ev.MessageID, "channel", ev.Channel)
-			return nil
-		}
-	}
-
 	// 3. Retrieve Workspace PII Opt-In
 	var piiOptIn bool
 	if p.wsRepo != nil {
@@ -312,7 +367,6 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 	}
 
 	// 4. Construct base event payload
-	traceID := uuid.New().String()
 	payload := InboundEventPayload{
 		Event:       "inbound_message",
 		TraceID:     traceID,
@@ -356,7 +410,7 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 	// 7. Drop event if it's completely empty
 	if payload.Body == "" && payload.Media == nil && payload.Location == nil && len(payload.Contacts) == 0 && payload.Interactive == nil && payload.Story == nil {
 		slog.Debug("inbound processor: ignoring empty inbound event payload")
-		return nil
+		return completeClaim()
 	}
 
 	// 8. Publish to NATS JetStream and Audit Log
@@ -371,6 +425,9 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 		if err != nil {
 			return fmt.Errorf("inbound: failed to publish event to NATS: %w", err)
 		}
+		if err := completeClaim(); err != nil {
+			return err
+		}
 
 		if p.auditWriter != nil {
 			err = p.auditWriter.Write(audit.NewEvent(ev.WorkspaceID, traceID, "inbound_message", eventData))
@@ -378,6 +435,8 @@ func (p *InboundProcessor) Process(ctx context.Context, ev *InboundEvent) error 
 				slog.Error("inbound processor: failed to write audit log", "error", err, "trace_id", traceID)
 			}
 		}
+	} else if err := completeClaim(); err != nil {
+		return err
 	}
 
 	// 9. Route inbound event via InboundRouter

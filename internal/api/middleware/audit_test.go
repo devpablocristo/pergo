@@ -70,7 +70,7 @@ func TestAuditMiddleware(t *testing.T) {
 		}
 	})
 
-	t.Run("authenticated API request records audit log asynchronously", func(t *testing.T) {
+	t.Run("authenticated API request records payload-free audit metadata synchronously", func(t *testing.T) {
 		body := `{"to":"+5511999999999","channel":"whatsapp","body":"hello"}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewBufferString(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -136,12 +136,17 @@ func TestAuditMiddleware(t *testing.T) {
 			if err := json.Unmarshal(log.Metadata, &meta); err != nil {
 				t.Fatalf("failed to unmarshal metadata JSON: %v", err)
 			}
-			if meta["to"] != "+5511999999999" || meta["channel"] != "whatsapp" {
+			if meta["method"] != http.MethodPost || meta["path"] != "/api/v1/messages" {
 				t.Errorf("unexpected metadata payload: %+v", meta)
 			}
+			for _, forbidden := range []string{"to", "body", "channel"} {
+				if _, exists := meta[forbidden]; exists {
+					t.Fatalf("sensitive request field %q reached audit metadata: %+v", forbidden, meta)
+				}
+			}
 
-		case <-time.After(200 * time.Millisecond):
-			t.Fatal("timeout waiting for asynchronous audit log insertion")
+		default:
+			t.Fatal("audit insertion did not finish before middleware returned")
 		}
 	})
 }
@@ -182,7 +187,7 @@ func TestDashboardAuditMiddleware(t *testing.T) {
 	})
 
 	t.Run("POST request audits successfully", func(t *testing.T) {
-		body := "name=TestCampaign&channel=whatsapp"
+		body := "name=TestCampaign&channel=whatsapp&app_secret=meta-secret-value&verify_token=meta-verify-value&phone=%2B5491112345678"
 		req := httptest.NewRequest(http.MethodPost, "/admin/workspaces/a88bd267-27b0-466d-a7b2-6c17d74db190/campaigns/new", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("User-Agent", "DashboardAgent")
@@ -220,16 +225,28 @@ func TestDashboardAuditMiddleware(t *testing.T) {
 			if log.UserAgent == nil || *log.UserAgent != "DashboardAgent" {
 				t.Errorf("expected user agent 'DashboardAgent', got '%v'", log.UserAgent)
 			}
-			
+
 			var meta map[string]any
 			if err := json.Unmarshal(log.Metadata, &meta); err != nil {
 				t.Fatalf("failed to parse metadata: %v", err)
 			}
-			if meta["name"] != "TestCampaign" || meta["channel"] != "whatsapp" {
+			if meta["method"] != http.MethodPost ||
+				meta["path"] != "/admin/workspaces/a88bd267-27b0-466d-a7b2-6c17d74db190/campaigns/new" {
 				t.Errorf("unexpected metadata: %+v", meta)
 			}
-		case <-time.After(200 * time.Millisecond):
-			t.Fatal("timeout waiting for audit log")
+			encoded := string(log.Metadata)
+			for _, forbidden := range []string{
+				"meta-secret-value",
+				"meta-verify-value",
+				"+5491112345678",
+				"TestCampaign",
+			} {
+				if strings.Contains(encoded, forbidden) {
+					t.Fatalf("dashboard audit metadata leaked %q: %s", forbidden, encoded)
+				}
+			}
+		default:
+			t.Fatal("dashboard audit insertion did not finish before middleware returned")
 		}
 	})
 }

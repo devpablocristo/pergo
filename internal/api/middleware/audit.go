@@ -1,13 +1,12 @@
 package middleware
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -26,20 +25,9 @@ func AuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 			path := c.Request().URL.Path
 
 			// Bypass check
-			if path == "/" || path == "/healthz" || path == "/readyz" || strings.HasPrefix(path, "/static") {
+			if path == "/" || path == "/healthz" || path == "/readyz" ||
+				strings.HasPrefix(path, "/static") || strings.HasPrefix(path, "/webhooks/") {
 				return next(c)
-			}
-
-			// Read request body for JSON endpoints (e.g. POST /api/v1/messages)
-			var bodyBytes []byte
-			if c.Request().Body != nil && (c.Request().Method == http.MethodPost || c.Request().Method == http.MethodPut || c.Request().Method == http.MethodPatch) {
-				if strings.Contains(c.Request().Header.Get("Content-Type"), "application/json") {
-					var err error
-					bodyBytes, err = io.ReadAll(c.Request().Body)
-					if err == nil {
-						c.Request().Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-					}
-				}
 			}
 
 			// Process request first to ensure the operation succeeded/completed
@@ -55,22 +43,14 @@ func AuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 				action := determineAction(c.Request().Method, path)
 
 				// Determine metadata
-				var metadataBytes []byte
-				if len(bodyBytes) > 0 {
-					var js map[string]any
-					if json.Unmarshal(bodyBytes, &js) == nil {
-						metadataBytes = bodyBytes
-					}
-				}
-				if len(metadataBytes) == 0 {
-					m := map[string]any{
-						"method": c.Request().Method,
-						"path":   path,
-					}
-					metadataBytes, _ = json.Marshal(m)
-				}
+				// Request payloads are deliberately excluded: message bodies,
+				// recipients, media and provider credentials are not audit
+				// metadata. The domain operation keeps its own durable record.
+				metadataBytes, _ := json.Marshal(map[string]any{
+					"method": c.Request().Method,
+					"path":   path,
+				})
 
-				// Run insertion asynchronously
 				logEntry := &repository.UserActionLog{
 					WorkspaceID: apiKey.WorkspaceID,
 					ActorType:   "api_key",
@@ -83,11 +63,11 @@ func AuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 					Metadata:    metadataBytes,
 				}
 
-				go func(bgCtx context.Context, l *repository.UserActionLog) {
-					if insertErr := repo.Insert(bgCtx, l); insertErr != nil {
-						slog.Error("failed to asynchronously insert audit log", "error", insertErr, "action", l.Action)
-					}
-				}(context.Background(), logEntry)
+				auditCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request().Context()), 2*time.Second)
+				defer cancel()
+				if insertErr := repo.Insert(auditCtx, logEntry); insertErr != nil {
+					slog.Error("failed to insert audit log", "error", insertErr, "action", logEntry.Action)
+				}
 			}
 
 			return err
@@ -138,18 +118,6 @@ func DashboardAuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 				return next(c)
 			}
 
-			// Parse form parameters
-			_ = c.Request().ParseForm()
-			formValues := make(map[string]any)
-			for k, v := range c.Request().PostForm {
-				// Redact sensitive keys
-				if strings.Contains(strings.ToLower(k), "token") || strings.Contains(strings.ToLower(k), "password") || strings.Contains(strings.ToLower(k), "cred") {
-					formValues[k] = "[REDACTED]"
-				} else if len(v) > 0 {
-					formValues[k] = v[0]
-				}
-			}
-
 			// Execute request
 			err := next(c)
 			if err != nil {
@@ -172,7 +140,10 @@ func DashboardAuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 
 			if workspaceID != uuid.Nil {
 				action := determineDashboardAction(method, path)
-				metadataBytes, _ := json.Marshal(formValues)
+				metadataBytes, _ := json.Marshal(map[string]any{
+					"method": method,
+					"path":   path,
+				})
 
 				logEntry := &repository.UserActionLog{
 					WorkspaceID: workspaceID,
@@ -186,11 +157,11 @@ func DashboardAuditMiddleware(repo ActionLogInserter) echo.MiddlewareFunc {
 					Metadata:    metadataBytes,
 				}
 
-				go func(bgCtx context.Context, l *repository.UserActionLog) {
-					if insertErr := repo.Insert(bgCtx, l); insertErr != nil {
-						slog.Error("failed to asynchronously insert dashboard audit log", "error", insertErr, "action", l.Action)
-					}
-				}(context.Background(), logEntry)
+				auditCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request().Context()), 2*time.Second)
+				defer cancel()
+				if insertErr := repo.Insert(auditCtx, logEntry); insertErr != nil {
+					slog.Error("failed to insert dashboard audit log", "error", insertErr, "action", logEntry.Action)
+				}
 			}
 
 			return err

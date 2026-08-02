@@ -63,6 +63,17 @@ type MessageDispatch struct {
 	ReceiptID         *uuid.UUID
 }
 
+type ProviderDeliveryOutboxEvent struct {
+	ID          uuid.UUID
+	WorkspaceID uuid.UUID
+	DispatchID  uuid.UUID
+	Status      string
+	EventKey    string
+	Payload     []byte
+	PublishedAt *time.Time
+	CreatedAt   time.Time
+}
+
 // MessageDispatchRepository manages message dispatch state in the database.
 type MessageDispatchRepository struct {
 	pool *pgxpool.Pool
@@ -73,7 +84,8 @@ func NewMessageDispatchRepository(pool *pgxpool.Pool) *MessageDispatchRepository
 	return &MessageDispatchRepository{pool: pool}
 }
 
-// GetOrCreateDispatch retrieves an existing dispatch by trace_id or inserts a new one if it doesn't exist.
+// GetOrCreateDispatch retrieves an existing workspace dispatch by trace_id or
+// inserts a new one if it doesn't exist.
 func (r *MessageDispatchRepository) GetOrCreateDispatch(
 	ctx context.Context,
 	workspaceID uuid.UUID,
@@ -97,7 +109,7 @@ func (r *MessageDispatchRepository) GetOrCreateDispatch(
 	err = r.pool.QueryRow(ctx,
 		`INSERT INTO message_dispatches (workspace_id, trace_id, current_channel, status, fallback_index, campaign_id, template_name, variables_json)
 		 VALUES ($1, $2, $3, 'queued', 0, $4, $5, $6)
-		 ON CONFLICT (trace_id) DO UPDATE 
+		 ON CONFLICT (workspace_id, trace_id) DO UPDATE
 		 SET trace_id = EXCLUDED.trace_id -- dummy update to return existing row
 		 RETURNING id, workspace_id, trace_id, current_channel, status, fallback_index, error_message, campaign_id, template_name, variables_json, created_at, updated_at, provider_message_id, receipt_id`,
 		workspaceID, traceID, initialChannel, campaignID, templateName, varsJSON,
@@ -126,6 +138,340 @@ func (r *MessageDispatchRepository) UpdateDispatchStatus(ctx context.Context, id
 	return err
 }
 
+// AdvanceProviderDeliveryStatus applies Meta delivery receipts monotonically.
+// Duplicate and stale callbacks are successful no-ops; concurrent callbacks
+// cannot regress read to delivered/sent or resurrect a failed dispatch.
+func (r *MessageDispatchRepository) AdvanceProviderDeliveryStatus(
+	ctx context.Context,
+	id uuid.UUID,
+	status string,
+) (bool, error) {
+	switch status {
+	case "sent", "delivered", "read", "failed":
+	default:
+		return false, fmt.Errorf("unsupported provider delivery status %q", status)
+	}
+
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE message_dispatches
+		SET status = $1,
+		    error_message = NULL,
+		    updated_at = clock_timestamp()
+		WHERE id = $2
+		  AND (
+		        (status IN ('queued', 'sending') AND $1 IN ('sent', 'delivered', 'read', 'failed'))
+		     OR (status = 'sent' AND $1 IN ('delivered', 'read', 'failed'))
+		     OR (status = 'delivered' AND $1 = 'read')
+		  )
+	`, status, id)
+	if err != nil {
+		return false, fmt.Errorf("advance provider delivery status: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT TRUE FROM message_dispatches WHERE id = $1`, id).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrDispatchNotFound
+		}
+		return false, fmt.Errorf("verify provider delivery status: %w", err)
+	}
+	return false, nil
+}
+
+// RecordProviderDeliveryReceipt atomically advances the dispatch and creates
+// its canonical webhook outbox event. Retries return the same pending event;
+// stale callbacks that never represented a transition return nil.
+func (r *MessageDispatchRepository) RecordProviderDeliveryReceipt(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	id uuid.UUID,
+	status string,
+	eventKey string,
+	payload []byte,
+) (*ProviderDeliveryOutboxEvent, error) {
+	if !isProviderDeliveryStatus(status) {
+		return nil, fmt.Errorf("unsupported provider delivery status %q", status)
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("begin provider receipt: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var current string
+	err = tx.QueryRow(ctx, `
+		SELECT status
+		FROM message_dispatches
+		WHERE id = $1
+		  AND workspace_id = $2
+		FOR UPDATE
+	`, id, workspaceID).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrDispatchNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock provider receipt dispatch: %w", err)
+	}
+
+	if providerDeliveryTransitionAllowed(current, status) {
+		if _, err := tx.Exec(ctx, `
+			UPDATE message_dispatches
+			SET status = $1,
+			    error_message = NULL,
+			    updated_at = clock_timestamp()
+			WHERE id = $2
+			  AND workspace_id = $3
+		`, status, id, workspaceID); err != nil {
+			return nil, fmt.Errorf("advance provider receipt: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO provider_delivery_outbox (
+				workspace_id, dispatch_id, status, event_key, payload
+			)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (dispatch_id, status) DO NOTHING
+		`, workspaceID, id, status, eventKey, payload); err != nil {
+			return nil, fmt.Errorf("insert provider receipt outbox: %w", err)
+		}
+	}
+
+	var event ProviderDeliveryOutboxEvent
+	err = tx.QueryRow(ctx, `
+		SELECT id, workspace_id, dispatch_id, status, event_key, payload,
+		       published_at, created_at
+		FROM provider_delivery_outbox
+		WHERE dispatch_id = $1
+		  AND status = $2
+	`, id, status).Scan(
+		&event.ID,
+		&event.WorkspaceID,
+		&event.DispatchID,
+		&event.Status,
+		&event.EventKey,
+		&event.Payload,
+		&event.PublishedAt,
+		&event.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit stale provider receipt: %w", err)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read provider receipt outbox: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit provider receipt: %w", err)
+	}
+	event.CreatedAt = event.CreatedAt.UTC()
+	if event.PublishedAt != nil {
+		published := event.PublishedAt.UTC()
+		event.PublishedAt = &published
+	}
+	return &event, nil
+}
+
+func (r *MessageDispatchRepository) MarkProviderDeliveryEventPublished(
+	ctx context.Context,
+	id uuid.UUID,
+) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE provider_delivery_outbox
+		SET published_at = COALESCE(published_at, clock_timestamp()),
+		    updated_at = clock_timestamp()
+		WHERE id = $1
+	`, id)
+	if err != nil {
+		return fmt.Errorf("mark provider delivery event published: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrDispatchNotFound
+	}
+	return nil
+}
+
+func (r *MessageDispatchRepository) ListPendingProviderDeliveryEvents(
+	ctx context.Context,
+	limit int,
+) ([]ProviderDeliveryOutboxEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, workspace_id, dispatch_id, status, event_key, payload,
+		       published_at, created_at
+		FROM provider_delivery_outbox
+		WHERE published_at IS NULL
+		ORDER BY created_at, id
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list provider delivery outbox: %w", err)
+	}
+	defer rows.Close()
+
+	var events []ProviderDeliveryOutboxEvent
+	for rows.Next() {
+		var event ProviderDeliveryOutboxEvent
+		if err := rows.Scan(
+			&event.ID,
+			&event.WorkspaceID,
+			&event.DispatchID,
+			&event.Status,
+			&event.EventKey,
+			&event.Payload,
+			&event.PublishedAt,
+			&event.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		event.CreatedAt = event.CreatedAt.UTC()
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+// EnsureDispatchWebhookEvent durably creates a non-terminal event such as
+// queued. A crash before broker publication is recovered by the relay.
+func (r *MessageDispatchRepository) EnsureDispatchWebhookEvent(
+	ctx context.Context,
+	id uuid.UUID,
+	event string,
+	errMsg *string,
+) error {
+	if event != "queued" {
+		return fmt.Errorf("unsupported explicit dispatch event %q", event)
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("begin dispatch event: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var (
+		workspaceID    uuid.UUID
+		traceID        string
+		receiptID      *uuid.UUID
+		currentChannel string
+	)
+	if err := tx.QueryRow(ctx, `
+		SELECT workspace_id, trace_id, receipt_id, current_channel
+		FROM message_dispatches
+		WHERE id = $1
+		FOR UPDATE
+	`, id).Scan(&workspaceID, &traceID, &receiptID, &currentChannel); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrDispatchNotFound
+		}
+		return fmt.Errorf("lock dispatch event: %w", err)
+	}
+	if err := enqueueDispatchEventTx(
+		ctx,
+		tx,
+		id,
+		workspaceID,
+		traceID,
+		receiptID,
+		event,
+		currentChannel,
+		errMsg,
+	); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit dispatch event: %w", err)
+	}
+	return nil
+}
+
+func dispatchWebhookEventForStatus(status string) string {
+	switch status {
+	case "sent":
+		return "sent"
+	case "failed", "uncertain":
+		return "failed"
+	default:
+		return ""
+	}
+}
+
+func enqueueDispatchEventTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	dispatchID uuid.UUID,
+	workspaceID uuid.UUID,
+	traceID string,
+	receiptID *uuid.UUID,
+	event string,
+	channel string,
+	errMsg *string,
+) error {
+	messageID := dispatchID
+	if receiptID != nil && *receiptID != uuid.Nil {
+		messageID = *receiptID
+	}
+	payload := struct {
+		Event       string `json:"event"`
+		TraceID     string `json:"trace_id"`
+		MessageID   string `json:"message_id"`
+		Channel     string `json:"channel"`
+		Timestamp   string `json:"timestamp"`
+		WorkspaceID string `json:"workspace_id"`
+		Error       string `json:"error,omitempty"`
+	}{
+		Event:       event,
+		TraceID:     traceID,
+		MessageID:   messageID.String(),
+		Channel:     channel,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		WorkspaceID: workspaceID.String(),
+	}
+	if errMsg != nil {
+		payload.Error = *errMsg
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal dispatch webhook event: %w", err)
+	}
+	eventKey := traceID + ".delivery." + event
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO provider_delivery_outbox (
+			workspace_id, dispatch_id, status, event_key, payload
+		)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (dispatch_id, status) DO NOTHING
+	`, workspaceID, dispatchID, event, eventKey, data); err != nil {
+		return fmt.Errorf("insert dispatch webhook outbox: %w", err)
+	}
+	return nil
+}
+
+func isProviderDeliveryStatus(status string) bool {
+	switch status {
+	case "sent", "delivered", "read", "failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func providerDeliveryTransitionAllowed(current, next string) bool {
+	switch current {
+	case "queued", "sending":
+		return isProviderDeliveryStatus(next)
+	case "sent":
+		return next == "delivered" || next == "read" || next == "failed"
+	case "delivered":
+		return next == "read"
+	default:
+		return false
+	}
+}
+
 // ClaimDelivery serializes provider dispatch across every PerGo replica.
 //
 // An expired queued/failed_transient claim is safe to recover because no
@@ -150,15 +496,23 @@ func (r *MessageDispatchRepository) ClaimDelivery(
 	}()
 
 	var (
-		status       string
-		currentToken *uuid.UUID
-		generation   int64
-		expiresAt    *time.Time
-		databaseNow  time.Time
+		status         string
+		workspaceID    uuid.UUID
+		traceID        string
+		currentChannel string
+		receiptID      *uuid.UUID
+		currentToken   *uuid.UUID
+		generation     int64
+		expiresAt      *time.Time
+		databaseNow    time.Time
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT
 			status,
+			workspace_id,
+			trace_id,
+			current_channel,
+			receipt_id,
 			delivery_claim_token,
 			delivery_claim_generation,
 			delivery_claim_expires_at,
@@ -166,7 +520,17 @@ func (r *MessageDispatchRepository) ClaimDelivery(
 		FROM message_dispatches
 		WHERE id = $1
 		FOR UPDATE
-	`, id).Scan(&status, &currentToken, &generation, &expiresAt, &databaseNow)
+	`, id).Scan(
+		&status,
+		&workspaceID,
+		&traceID,
+		&currentChannel,
+		&receiptID,
+		&currentToken,
+		&generation,
+		&expiresAt,
+		&databaseNow,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DispatchClaim{}, 0, ErrDispatchNotFound
 	}
@@ -186,7 +550,7 @@ func (r *MessageDispatchRepository) ClaimDelivery(
 	}
 
 	if status == "sending" {
-		const uncertainMessage = "DELIVERY_UNCERTAIN"
+		uncertainMessage := "DELIVERY_UNCERTAIN"
 		if _, err := tx.Exec(ctx, `
 			UPDATE message_dispatches
 			SET status = 'uncertain',
@@ -197,6 +561,19 @@ func (r *MessageDispatchRepository) ClaimDelivery(
 			WHERE id = $2
 		`, uncertainMessage, id); err != nil {
 			return DispatchClaim{}, 0, fmt.Errorf("mark expired dispatch uncertain: %w", err)
+		}
+		if err := enqueueDispatchEventTx(
+			ctx,
+			tx,
+			id,
+			workspaceID,
+			traceID,
+			receiptID,
+			"failed",
+			currentChannel,
+			&uncertainMessage,
+		); err != nil {
+			return DispatchClaim{}, 0, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return DispatchClaim{}, 0, fmt.Errorf("commit uncertain dispatch: %w", err)
@@ -245,7 +622,18 @@ func (r *MessageDispatchRepository) UpdateClaimedDelivery(
 	providerMessageID *string,
 	release bool,
 ) error {
-	tag, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("begin claimed dispatch update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var (
+		workspaceID uuid.UUID
+		traceID     string
+		receiptID   *uuid.UUID
+	)
+	err = tx.QueryRow(ctx, `
 		UPDATE message_dispatches
 		SET status = $1,
 		    current_channel = $2,
@@ -259,13 +647,37 @@ func (r *MessageDispatchRepository) UpdateClaimedDelivery(
 		  AND delivery_claim_token = $8
 		  AND delivery_claim_generation = $9
 		  AND delivery_claim_expires_at > clock_timestamp()
-	`, status, currentChannel, fallbackIndex, errMsg, providerMessageID, release, id, claim.Token, claim.Generation)
-	if err != nil {
-		return fmt.Errorf("update claimed dispatch: %w", err)
-	}
-	if tag.RowsAffected() == 1 {
+		RETURNING workspace_id, trace_id, receipt_id
+	`, status, currentChannel, fallbackIndex, errMsg, providerMessageID, release, id, claim.Token, claim.Generation).Scan(
+		&workspaceID,
+		&traceID,
+		&receiptID,
+	)
+	if err == nil {
+		if event := dispatchWebhookEventForStatus(status); event != "" {
+			if err := enqueueDispatchEventTx(
+				ctx,
+				tx,
+				id,
+				workspaceID,
+				traceID,
+				receiptID,
+				event,
+				currentChannel,
+				errMsg,
+			); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit claimed dispatch update: %w", err)
+		}
 		return nil
 	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("update claimed dispatch: %w", err)
+	}
+	_ = tx.Rollback(ctx)
 
 	if release && isTerminalDispatchStatus(status) {
 		var (
@@ -347,14 +759,20 @@ func sameOptionalString(stored *string, desired *string) bool {
 	return stored != nil && *stored == *desired
 }
 
-// GetByTraceID retrieves a message dispatch record by trace_id.
-func (r *MessageDispatchRepository) GetByTraceID(ctx context.Context, traceID string) (*MessageDispatch, error) {
+// GetByTraceID retrieves a message dispatch by workspace-scoped trace ID.
+func (r *MessageDispatchRepository) GetByTraceID(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	traceID string,
+) (*MessageDispatch, error) {
 	var d MessageDispatch
 	var varsRaw []byte
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, workspace_id, trace_id, current_channel, status, fallback_index, error_message, campaign_id, template_name, variables_json, created_at, updated_at, provider_message_id, receipt_id
-		 FROM message_dispatches WHERE trace_id = $1`,
-		traceID,
+		 FROM message_dispatches
+		 WHERE workspace_id = $1
+		   AND trace_id = $2`,
+		workspaceID, traceID,
 	).Scan(&d.ID, &d.WorkspaceID, &d.TraceID, &d.CurrentChannel, &d.Status, &d.FallbackIndex, &d.ErrorMessage, &d.CampaignID, &d.TemplateName, &varsRaw, &d.CreatedAt, &d.UpdatedAt, &d.ProviderMessageID, &d.ReceiptID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

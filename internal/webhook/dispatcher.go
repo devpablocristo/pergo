@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pablojhp.pergo/internal/platform/netpolicy"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -51,7 +52,10 @@ func (e *HTTPError) Error() string {
 var (
 	ErrSubscriptionInactive = errors.New("webhook subscription is inactive")
 	ErrSubscriptionNotFound = errors.New("webhook subscription not found")
+	ErrPIIRedactionFailed   = errors.New("webhook PII redaction failed")
 )
+
+const maxWebhookResponseBodyBytes int64 = 1 << 20
 
 type WebhookDeliveryTask struct {
 	ID             uuid.UUID `json:"id"`
@@ -82,7 +86,7 @@ type DefaultDispatcher struct {
 // NewDefaultDispatcher creates a new DefaultDispatcher instance.
 func NewDefaultDispatcher(subStore SubscriptionStore, dlqStore DLQStore, wsStore WorkspaceStore, client HTTPClient, verbsEngine *VerbsEngine) *DefaultDispatcher {
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = netpolicy.NewPublicHTTPPolicy().Client(10 * time.Second)
 	}
 	return &DefaultDispatcher{
 		subStore:    subStore,
@@ -106,6 +110,9 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, task WebhookDeliveryTa
 
 	if !sub.Active {
 		return ErrSubscriptionInactive
+	}
+	if sub.WorkspaceID != task.WorkspaceID {
+		return ErrSubscriptionNotFound
 	}
 
 	payloadBytes := task.Payload
@@ -133,17 +140,23 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, task WebhookDeliveryTa
 				Location    any    `json:"location,omitempty"`
 				Contacts    any    `json:"contacts,omitempty"`
 			}
-			if err := json.Unmarshal(task.Payload, &inboundPayload); err == nil {
-				// Hash from field
-				hasher := sha256.New()
-				hasher.Write([]byte(inboundPayload.From))
-				inboundPayload.From = hex.EncodeToString(hasher.Sum(nil))
+			if err := json.Unmarshal(task.Payload, &inboundPayload); err != nil {
+				return fmt.Errorf("%w: invalid inbound payload", ErrPIIRedactionFailed)
+			}
+			// Pseudonymize the sender with the tenant subscription secret so a
+			// phone-number dictionary cannot reverse a plain SHA-256 digest.
+			hasher := hmac.New(sha256.New, sub.Secret)
+			hasher.Write([]byte(inboundPayload.From))
+			inboundPayload.From = hex.EncodeToString(hasher.Sum(nil))
 
-				// Strip location and contacts
-				inboundPayload.Location = nil
-				inboundPayload.Contacts = nil
+			// Strip structured high-risk fields. Message body is deliberately
+			// retained as the subscribed business event content.
+			inboundPayload.Location = nil
+			inboundPayload.Contacts = nil
 
-				payloadBytes, _ = json.Marshal(inboundPayload)
+			payloadBytes, err = json.Marshal(inboundPayload)
+			if err != nil {
+				return fmt.Errorf("%w: encode redacted inbound payload", ErrPIIRedactionFailed)
 			}
 		}
 	}
@@ -159,6 +172,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, task WebhookDeliveryTa
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-PerGo-Signature", signature)
+	req.Header.Set("X-PerGo-Delivery-ID", task.ID.String())
 	if task.TraceID != "" {
 		req.Header.Set("X-Trace-ID", task.TraceID)
 	}
@@ -174,21 +188,25 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, task WebhookDeliveryTa
 	}
 
 	// Read response body to extract potential messaging verbs
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxWebhookResponseBodyBytes+1))
 	if err != nil {
 		slog.Error("failed to read webhook response body", "error", err, "trace_id", task.TraceID)
+		return nil
+	}
+	if int64(len(bodyBytes)) > maxWebhookResponseBodyBytes {
+		// The callback already returned 2xx, so retrying the POST could duplicate
+		// a tenant-visible side effect. Verbs are optional; ignore an abusive
+		// response body while treating the accepted delivery as successful.
+		slog.Warn("ignoring oversized webhook response body", "trace_id", task.TraceID)
 		return nil
 	}
 
 	var verbs []Verb
 	if err := json.Unmarshal(bodyBytes, &verbs); err == nil && len(verbs) > 0 {
 		if d.verbsEngine != nil {
-			go func() {
-				execCtx := context.Background()
-				if err := d.verbsEngine.Execute(execCtx, task, verbs); err != nil {
-					slog.Error("verbs engine execution failed", "error", err, "trace_id", task.TraceID)
-				}
-			}()
+			if err := d.verbsEngine.Execute(ctx, task, verbs); err != nil {
+				slog.Error("verbs engine execution failed", "error", err, "trace_id", task.TraceID)
+			}
 		}
 	}
 
@@ -209,6 +227,9 @@ func (d *DefaultDispatcher) WriteToDLQ(
 	sub, err := d.subStore.Get(ctx, subscriptionID)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve subscription for DLQ: %w", err)
+	}
+	if sub.WorkspaceID != workspaceID {
+		return fmt.Errorf("failed to retrieve subscription for DLQ: %w", ErrSubscriptionNotFound)
 	}
 
 	return d.dlqStore.InsertDLQ(

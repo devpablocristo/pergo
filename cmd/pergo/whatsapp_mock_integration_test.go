@@ -166,18 +166,24 @@ func TestWhatsAppMockEndToEnd(t *testing.T) {
 		t.Fatalf("response X-Trace-ID = %q, want %q", got, traceID)
 	}
 
-	waitForMockDispatch(t, ctx, dispatchRepo, traceID)
+	waitForMockDispatch(t, ctx, dispatchRepo, workspace.ID, traceID)
 	waitForMockAudit(t, ctx, pool, workspace.ID, traceID, expectedMockProviderID(traceID))
 }
 
-func waitForMockDispatch(t *testing.T, ctx context.Context, repo *repository.MessageDispatchRepository, traceID string) {
+func waitForMockDispatch(
+	t *testing.T,
+	ctx context.Context,
+	repo *repository.MessageDispatchRepository,
+	workspaceID uuid.UUID,
+	traceID string,
+) {
 	t.Helper()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 
 	var lastStatus string
 	for {
-		dispatch, err := repo.GetByTraceID(ctx, traceID)
+		dispatch, err := repo.GetByTraceID(ctx, workspaceID, traceID)
 		if err == nil {
 			lastStatus = fmt.Sprintf("%s/%s", dispatch.Status, dispatch.CurrentChannel)
 			if dispatch.Status == "sent" && dispatch.CurrentChannel == "whatsapp_mock" {

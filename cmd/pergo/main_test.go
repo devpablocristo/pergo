@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v5"
 	"github.com/pablojhp.pergo/internal/api/handler"
 	"github.com/pablojhp.pergo/internal/channel/whatsapp"
+	"github.com/pablojhp.pergo/internal/config"
 	"github.com/pablojhp.pergo/internal/integration/chatwoot"
 	"github.com/pablojhp.pergo/internal/integration/typebot"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
@@ -42,6 +44,96 @@ func TestServerBootHealthz(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPServerAppliesBoundedReadAndIdlePolicy(t *testing.T) {
+	srv := newHTTPServer(":0", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	if srv.ReadHeaderTimeout != 5*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %s, want 5s", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout != 30*time.Second {
+		t.Fatalf("ReadTimeout = %s, want 30s", srv.ReadTimeout)
+	}
+	if srv.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout = %s, want 60s", srv.IdleTimeout)
+	}
+	if srv.MaxHeaderBytes != 1<<20 {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", srv.MaxHeaderBytes, 1<<20)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want zero for streaming responses", srv.WriteTimeout)
+	}
+}
+
+func TestRuntimeProfileRouteIsolation(t *testing.T) {
+	tests := []struct {
+		profile string
+		path    string
+		want    int
+	}{
+		{profile: config.RuntimeAPI, path: "/api/v1/messages", want: http.StatusNoContent},
+		{profile: config.RuntimeAPI, path: "/webhooks/waba/workspace", want: http.StatusNotFound},
+		{profile: config.RuntimeWebhook, path: "/webhooks/waba/workspace", want: http.StatusNoContent},
+		{profile: config.RuntimeWebhook, path: "/api/integrations/chatwoot", want: http.StatusNoContent},
+		{profile: config.RuntimeWebhook, path: "/api/v1/messages", want: http.StatusNotFound},
+		{profile: config.RuntimeWebhook, path: "/healthz", want: http.StatusNoContent},
+		{profile: config.RuntimeWorker, path: "/healthz", want: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.profile+" "+tt.path, func(t *testing.T) {
+			e := echosrv.New()
+			e.Use(profileAccessMiddleware(tt.profile))
+			e.Any("/*", func(c *echo.Context) error {
+				return c.NoContent(http.StatusNoContent)
+			})
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
+			}
+		})
+	}
+}
+
+func TestApplyRuntimeProfileArgument(t *testing.T) {
+	cfg := &config.Config{RuntimeProfile: config.RuntimeAll}
+	if err := applyRuntimeProfileArgument(cfg, []string{"worker"}); err != nil {
+		t.Fatalf("applyRuntimeProfileArgument() error = %v", err)
+	}
+	if cfg.RuntimeProfile != config.RuntimeWorker {
+		t.Fatalf("RuntimeProfile = %q", cfg.RuntimeProfile)
+	}
+	if err := applyRuntimeProfileArgument(cfg, []string{"unknown"}); err == nil {
+		t.Fatal("unknown profile was accepted")
+	}
+}
+
+func TestRuntimeProfileProcessRoles(t *testing.T) {
+	tests := []struct {
+		profile     string
+		runsHTTP    bool
+		runsWorkers bool
+	}{
+		{profile: config.RuntimeAll, runsHTTP: true, runsWorkers: true},
+		{profile: config.RuntimeAPI, runsHTTP: true},
+		{profile: config.RuntimeWebhook, runsHTTP: true},
+		{profile: config.RuntimeWorker, runsWorkers: true},
+		{profile: config.RuntimeMigrate},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.profile, func(t *testing.T) {
+			if got := profileRunsHTTP(tt.profile); got != tt.runsHTTP {
+				t.Fatalf("profileRunsHTTP() = %v, want %v", got, tt.runsHTTP)
+			}
+			if got := profileRunsWorkers(tt.profile); got != tt.runsWorkers {
+				t.Fatalf("profileRunsWorkers() = %v, want %v", got, tt.runsWorkers)
+			}
+		})
 	}
 }
 

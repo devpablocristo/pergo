@@ -60,3 +60,14 @@ func TestS3ClientUploadAndDownload(t *testing.T) {
 		}
 	})
 }
+
+func TestDisabledS3ClientFailsClosed(t *testing.T) {
+	client := NewDisabledS3Client()
+
+	if err := client.Upload(context.Background(), "key", []byte("data"), "text/plain"); !errors.Is(err, ErrMediaDisabled) {
+		t.Fatalf("Upload() error = %v, want ErrMediaDisabled", err)
+	}
+	if _, _, err := client.Download(context.Background(), "key"); !errors.Is(err, ErrMediaDisabled) {
+		t.Fatalf("Download() error = %v, want ErrMediaDisabled", err)
+	}
+}

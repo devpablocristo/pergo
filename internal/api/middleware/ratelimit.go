@@ -22,6 +22,74 @@ type RateLimiter struct {
 	burst    int
 }
 
+type ipLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// IPRateLimiter protects unauthenticated endpoints such as the admin login.
+// Its key map is bounded so spoofed source addresses cannot grow memory
+// indefinitely. The deployment edge should enforce an additional shared limit.
+type IPRateLimiter struct {
+	mu         sync.Mutex
+	entries    map[string]*ipLimiterEntry
+	rate       rate.Limit
+	burst      int
+	maxEntries int
+}
+
+func NewIPRateLimiter(rps float64, burst int) *IPRateLimiter {
+	return &IPRateLimiter{
+		entries:    make(map[string]*ipLimiterEntry),
+		rate:       rate.Limit(rps),
+		burst:      burst,
+		maxEntries: 4096,
+	}
+}
+
+func (rl *IPRateLimiter) Allow(ip string) bool {
+	now := time.Now()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	entry, ok := rl.entries[ip]
+	if !ok {
+		if len(rl.entries) >= rl.maxEntries {
+			rl.evictOldest()
+		}
+		entry = &ipLimiterEntry{limiter: rate.NewLimiter(rl.rate, rl.burst)}
+		rl.entries[ip] = entry
+	}
+	entry.lastSeen = now
+	return entry.limiter.Allow()
+}
+
+func (rl *IPRateLimiter) evictOldest() {
+	var oldestKey string
+	var oldestTime time.Time
+	for key, entry := range rl.entries {
+		if oldestKey == "" || entry.lastSeen.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = entry.lastSeen
+		}
+	}
+	if oldestKey != "" {
+		delete(rl.entries, oldestKey)
+	}
+}
+
+func IPRateLimiterMiddleware(rl *IPRateLimiter) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			if !rl.Allow(c.RealIP()) {
+				c.Response().Header().Set("Retry-After", "5")
+				return c.String(http.StatusTooManyRequests, "too many login attempts")
+			}
+			return next(c)
+		}
+	}
+}
+
 // NewRateLimiter creates a rate limiter with the given requests-per-second
 // rate and burst size. Each workspace gets an independent token bucket.
 func NewRateLimiter(rps float64, burst int) *RateLimiter {

@@ -21,6 +21,11 @@ const maxMediaSize = 25 * 1024 * 1024
 // ErrMediaSizeExceeded is returned when the downloaded file exceeds the maximum size boundary.
 var ErrMediaSizeExceeded = errors.New("media_size_exceeded")
 
+// ErrDisabled is returned when durable media storage is intentionally
+// unavailable. Inbound adapters use it to fail before contacting providers so
+// webhooks can be retried instead of silently acknowledging lost attachments.
+var ErrDisabled = storage.ErrMediaDisabled
+
 // DownloadResult holds metadata and data of the validated download.
 type DownloadResult struct {
 	Bytes       []byte
@@ -61,6 +66,13 @@ func NewDefaultEngine(s3Client *storage.S3Client) *DefaultEngine {
 	}
 }
 
+// MediaEnabled reports whether the engine can durably ingest media. A nil
+// storage client is retained as an enabled downloader-only mode for focused
+// tests and callers that only use Download.
+func (e *DefaultEngine) MediaEnabled() bool {
+	return e != nil && (e.s3Client == nil || e.s3Client.Enabled())
+}
+
 // Download fetches media from the URL, enforcing headers, timeouts, and size limits.
 func (e *DefaultEngine) Download(
 	ctx context.Context,
@@ -68,6 +80,9 @@ func (e *DefaultEngine) Download(
 	headers map[string]string,
 	maxBytes int64,
 ) (*DownloadResult, error) {
+	if e.s3Client != nil && !e.s3Client.Enabled() {
+		return nil, storage.ErrMediaDisabled
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +48,10 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to ensure MESSAGES stream: %v", err)
 	}
+	_, err = queue.EnsureWebhookStream(ctx, nc)
+	if err != nil {
+		t.Fatalf("failed to ensure WEBHOOKS stream: %v", err)
+	}
 
 	wsRepo := repository.NewWorkspaceRepository(pool)
 	kek := make([]byte, 32)
@@ -65,9 +72,15 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
 
 	// 2. Setup a Connection (with WABA credentials)
+	const (
+		appSecret = "meta-app-secret-for-status-test1"
+		phoneID   = "status-phone-number-id"
+	)
 	configPayload := map[string]string{
-		"verify_token": "my-waba-verify-token",
-		"token":        "waba-test-token",
+		"phone_number_id": phoneID,
+		"verify_token":    "Ne5uQ7vH2xZ9cM4jA8rT1pL6bK3sD0wF",
+		"app_secret":      appSecret,
+		"token":           "waba-test-token",
 	}
 	configBytes, _ := json.Marshal(configPayload)
 	conn := &repository.Connection{
@@ -142,7 +155,8 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 						"value": {
 							"messaging_product": "whatsapp",
 							"metadata": {
-								"display_phone_number": "123456789"
+								"display_phone_number": "123456789",
+								"phone_number_id": "` + phoneID + `"
 							},
 							"statuses": [
 								{
@@ -161,6 +175,7 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 
 	reqDelivered := httptest.NewRequest(http.MethodPost, "/webhooks/waba/"+ws.ID.String(), strings.NewReader(bodyDelivered))
 	reqDelivered.Header.Set("Content-Type", "application/json")
+	reqDelivered.Header.Set("X-Hub-Signature-256", signWABAStatusPayload([]byte(bodyDelivered), appSecret))
 	recDelivered := httptest.NewRecorder()
 	cDelivered := e.NewContext(reqDelivered, recDelivered)
 	cDelivered.SetPath("/webhooks/waba/:workspace_id")
@@ -197,7 +212,8 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 						"value": {
 							"messaging_product": "whatsapp",
 							"metadata": {
-								"display_phone_number": "123456789"
+								"display_phone_number": "123456789",
+								"phone_number_id": "` + phoneID + `"
 							},
 							"statuses": [
 								{
@@ -216,6 +232,7 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 
 	reqRead := httptest.NewRequest(http.MethodPost, "/webhooks/waba/"+ws.ID.String(), strings.NewReader(bodyRead))
 	reqRead.Header.Set("Content-Type", "application/json")
+	reqRead.Header.Set("X-Hub-Signature-256", signWABAStatusPayload([]byte(bodyRead), appSecret))
 	recRead := httptest.NewRecorder()
 	cRead := e.NewContext(reqRead, recRead)
 	cRead.SetPath("/webhooks/waba/:workspace_id")
@@ -253,4 +270,10 @@ func TestWABAStatusReceiptsEndToEnd(t *testing.T) {
 	} else if *thread[0].Status != "read" {
 		t.Errorf("expected status 'read', got %q", *thread[0].Status)
 	}
+}
+
+func signWABAStatusPayload(payload []byte, appSecret string) string {
+	mac := hmac.New(sha256.New, []byte(appSecret))
+	_, _ = mac.Write(payload)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }

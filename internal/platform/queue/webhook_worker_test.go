@@ -19,6 +19,38 @@ import (
 	"github.com/pablojhp.pergo/internal/webhook"
 )
 
+type cancellationAwareDLQDispatcher struct {
+	started  chan struct{}
+	canceled chan struct{}
+	once     sync.Once
+}
+
+func newCancellationAwareDLQDispatcher() *cancellationAwareDLQDispatcher {
+	return &cancellationAwareDLQDispatcher{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+}
+
+func (d *cancellationAwareDLQDispatcher) Dispatch(context.Context, webhook.WebhookDeliveryTask) error {
+	return &webhook.HTTPError{StatusCode: http.StatusNotFound, Status: "404 Not Found"}
+}
+
+func (d *cancellationAwareDLQDispatcher) WriteToDLQ(
+	ctx context.Context,
+	_ uuid.UUID,
+	_ uuid.UUID,
+	_, _, _ string,
+	_ []byte,
+	_ int,
+	_ string,
+) error {
+	d.once.Do(func() { close(d.started) })
+	<-ctx.Done()
+	close(d.canceled)
+	return ctx.Err()
+}
+
 func TestSignPayload(t *testing.T) {
 	payload := []byte(`{"hello":"world"}`)
 	secret := []byte("secret")
@@ -51,7 +83,7 @@ func TestWebhookWorker_Integration(t *testing.T) {
 	// Delete stream to ensure clean test state
 	js, err := jetstream.New(nc)
 	if err == nil {
-		_ = js.DeleteStream(ctx, "WEBHOOKS")
+		_ = js.DeleteStream(ctx, WebhookStreamName)
 	}
 
 	// 1. Setup repository
@@ -106,7 +138,10 @@ func TestWebhookWorker_Integration(t *testing.T) {
 	}
 
 	// 5. Instantiate and Start WebhookWorker
-	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, nil, nil)
+	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, testServer.Client(), nil)
+	if err := ensureWebhookWorkerResources(ctx, nc); err != nil {
+		t.Fatalf("bootstrap webhook worker resources: %v", err)
+	}
 	worker, err := NewWebhookWorker(ctx, nc, dispatcher, subRepo)
 	if err != nil {
 		t.Fatalf("failed to start webhook worker: %v", err)
@@ -158,6 +193,9 @@ func TestWebhookWorker_Integration(t *testing.T) {
 	if count == 0 {
 		t.Fatal("webhook was not delivered to mock server within timeout")
 	}
+	if headers.Get("X-PerGo-Delivery-ID") == "" {
+		t.Fatal("webhook delivery is missing stable X-PerGo-Delivery-ID")
+	}
 
 	// 8. Verify payload
 	var receivedEvent WebhookEvent
@@ -188,6 +226,52 @@ func TestWebhookWorker_Integration(t *testing.T) {
 	}
 }
 
+func TestDeterministicWebhookDeliveryID(t *testing.T) {
+	workspaceID := uuid.New()
+	subscriptionID := uuid.New()
+	event := WebhookEvent{
+		Event:       "inbound_message",
+		TraceID:     "stable-inbound-trace",
+		MessageID:   "wamid.stable",
+		WorkspaceID: workspaceID.String(),
+	}
+	payload := []byte(`{"event":"inbound_message","channel":"whatsapp","body":"first"}`)
+	first := deterministicWebhookDeliveryID("inbound", workspaceID, subscriptionID, event, payload)
+	second := deterministicWebhookDeliveryID("inbound", workspaceID, subscriptionID, event, payload)
+	if first == uuid.Nil || first != second {
+		t.Fatalf("delivery identity is not stable: first=%s second=%s", first, second)
+	}
+	if got := deterministicWebhookDeliveryID(
+		"inbound",
+		workspaceID,
+		uuid.New(),
+		event,
+		payload,
+	); got == first {
+		t.Fatal("different subscriptions shared one delivery identity")
+	}
+	event.TraceID = "different-event"
+	if got := deterministicWebhookDeliveryID(
+		"inbound",
+		workspaceID,
+		subscriptionID,
+		event,
+		payload,
+	); got == first {
+		t.Fatal("different events shared one delivery identity")
+	}
+	event.TraceID = "stable-inbound-trace"
+	if got := deterministicWebhookDeliveryID(
+		"inbound",
+		workspaceID,
+		subscriptionID,
+		event,
+		[]byte(`{"event":"inbound_message","channel":"whatsapp","body":"corrected"}`),
+	); got == first {
+		t.Fatal("different payloads shared one delivery identity")
+	}
+}
+
 func TestWebhookWorker_TerminalErrorDLQ(t *testing.T) {
 	nc := connectNATS(t)
 	pool := getTestPool(t)
@@ -198,7 +282,7 @@ func TestWebhookWorker_TerminalErrorDLQ(t *testing.T) {
 	// Delete stream to ensure clean test state
 	js, err := jetstream.New(nc)
 	if err == nil {
-		_ = js.DeleteStream(ctx, "WEBHOOKS")
+		_ = js.DeleteStream(ctx, WebhookStreamName)
 	}
 
 	kek := make([]byte, 32)
@@ -230,7 +314,10 @@ func TestWebhookWorker_TerminalErrorDLQ(t *testing.T) {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
 
-	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, nil, nil)
+	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, testServer.Client(), nil)
+	if err := ensureWebhookWorkerResources(ctx, nc); err != nil {
+		t.Fatalf("bootstrap webhook worker resources: %v", err)
+	}
 	worker, err := NewWebhookWorker(ctx, nc, dispatcher, subRepo)
 	if err != nil {
 		t.Fatalf("failed to start worker: %v", err)
@@ -294,11 +381,115 @@ func TestEnsureWebhookStream(t *testing.T) {
 		t.Fatalf("stream.Info failed: %v", err)
 	}
 
-	if info.Config.Name != "WEBHOOKS" {
-		t.Errorf("expected stream name WEBHOOKS, got %q", info.Config.Name)
+	if info.Config.Name != WebhookStreamName {
+		t.Errorf("expected stream name %s, got %q", WebhookStreamName, info.Config.Name)
 	}
-	if info.Config.Retention != jetstream.LimitsPolicy {
-		t.Errorf("expected retention LimitsPolicy, got %v", info.Config.Retention)
+	if info.Config.Retention != jetstream.WorkQueuePolicy {
+		t.Errorf("expected retention WorkQueuePolicy, got %v", info.Config.Retention)
+	}
+	if info.Config.MaxMsgsPerSubject != MaxEventQueueDepth ||
+		!info.Config.DiscardNewPerSubject {
+		t.Errorf(
+			"workspace isolation MaxMsgsPerSubject=%d DiscardNewPerSubject=%v",
+			info.Config.MaxMsgsPerSubject,
+			info.Config.DiscardNewPerSubject,
+		)
+	}
+}
+
+func TestWebhookWorkerStopIsPrompt(t *testing.T) {
+	nc := connectNATS(t)
+	if err := ensureWebhookWorkerResources(context.Background(), nc); err != nil {
+		t.Fatalf("bootstrap webhook worker resources: %v", err)
+	}
+	worker, err := NewWebhookWorker(context.Background(), nc, nil, nil)
+	if err != nil {
+		t.Fatalf("NewWebhookWorker: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		worker.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("WebhookWorker.Stop did not promptly unblock all MessagesContext.Next calls")
+	}
+}
+
+func TestWebhookWorkerStopCancelsActiveDLQWrite(t *testing.T) {
+	nc := connectNATS(t)
+	ctx := context.Background()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatalf("jetstream.New: %v", err)
+	}
+	_ = js.DeleteStream(ctx, WebhookDeliveryStreamName)
+	_ = js.DeleteStream(ctx, WebhookStreamName)
+	_ = js.DeleteStream(ctx, InboundStreamName)
+	t.Cleanup(func() {
+		_ = js.DeleteStream(context.Background(), WebhookDeliveryStreamName)
+		_ = js.DeleteStream(context.Background(), WebhookStreamName)
+		_ = js.DeleteStream(context.Background(), InboundStreamName)
+	})
+
+	dispatcher := newCancellationAwareDLQDispatcher()
+	if err := ensureWebhookWorkerResources(ctx, nc); err != nil {
+		t.Fatalf("bootstrap webhook worker resources: %v", err)
+	}
+	worker, err := NewWebhookWorker(ctx, nc, dispatcher, nil)
+	if err != nil {
+		t.Fatalf("NewWebhookWorker: %v", err)
+	}
+	t.Cleanup(worker.Stop)
+
+	task := webhook.WebhookDeliveryTask{
+		ID:             uuid.New(),
+		SubscriptionID: uuid.New(),
+		WorkspaceID:    uuid.New(),
+		Event:          "message.failed",
+		TraceID:        uuid.New().String(),
+		MessageID:      uuid.New().String(),
+		Payload:        []byte(`{"status":"failed"}`),
+		Mode:           "outbound",
+	}
+	payload, err := json.Marshal(task)
+	if err != nil {
+		worker.Stop()
+		t.Fatalf("marshal task: %v", err)
+	}
+	publisher := NewJetStreamPublisher(nc)
+	subject := "webhooks.deliveries." + task.WorkspaceID.String()
+	if err := publisher.Publish(ctx, subject, payload, task.ID.String()); err != nil {
+		worker.Stop()
+		t.Fatalf("publish delivery: %v", err)
+	}
+
+	select {
+	case <-dispatcher.started:
+	case <-time.After(3 * time.Second):
+		worker.Stop()
+		t.Fatal("worker did not enter terminal DLQ write")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		worker.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Stop did not cancel the active DLQ write")
+	}
+	select {
+	case <-dispatcher.canceled:
+	default:
+		t.Fatal("DLQ dispatcher did not observe cancellation")
 	}
 }
 
@@ -312,8 +503,8 @@ func TestWebhookWorker_Inbound(t *testing.T) {
 	// Delete streams to ensure clean test state
 	js, err := jetstream.New(nc)
 	if err == nil {
-		_ = js.DeleteStream(ctx, "INBOUND")
-		_ = js.DeleteStream(ctx, "WEBHOOKS")
+		_ = js.DeleteStream(ctx, InboundStreamName)
+		_ = js.DeleteStream(ctx, WebhookStreamName)
 	}
 
 	// 1. Setup repository
@@ -349,7 +540,10 @@ func TestWebhookWorker_Inbound(t *testing.T) {
 		t.Fatalf("failed to create subscription: %v", err)
 	}
 
-	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, nil, nil)
+	dispatcher := webhook.NewDefaultDispatcher(subRepo, dlqRepo, wsRepo, testServer.Client(), nil)
+	if err := ensureWebhookWorkerResources(ctx, nc); err != nil {
+		t.Fatalf("bootstrap webhook worker resources: %v", err)
+	}
 	worker, err := NewWebhookWorker(ctx, nc, dispatcher, subRepo)
 	if err != nil {
 		t.Fatalf("failed to start worker: %v", err)

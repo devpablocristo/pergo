@@ -43,8 +43,13 @@ services:
       nats:
         condition: service_healthy
     environment:
+      PERGO_ENVIRONMENT: development
+      PERGO_RUNTIME_PROFILE: all
+      PERGO_RUN_MIGRATIONS: "true"
       PERGO_DATABASE_URL: postgres://admin:admin@postgres:5432/pergo_db?sslmode=disable
-      PERGO_NATS_URL: nats://nats:4222
+      PERGO_NATS_URLS: nats://nats:4222
+      PERGO_NATS_STREAM_REPLICAS: "1"
+      PERGO_MEDIA_MODE: memory
       PERGO_SERVER_PORT: "8080"
       PERGO_ADMIN_PASSWORD: ${PERGO_ADMIN_PASSWORD:-pergo-dev-2026}
       PERGO_EXTERNAL_URL: ${PERGO_EXTERNAL_URL:-http://localhost:8080}

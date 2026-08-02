@@ -160,6 +160,34 @@ func TestRateLimiterMiddlewareNoWorkspace(t *testing.T) {
 	}
 }
 
+func TestIPRateLimiterMiddlewareIsolatesClientsAndBoundsBurst(t *testing.T) {
+	e := echo.New()
+	rl := NewIPRateLimiter(0.001, 1)
+	e.POST("/admin/login", func(c *echo.Context) error {
+		return c.NoContent(http.StatusNoContent)
+	}, IPRateLimiterMiddleware(rl))
+
+	request := func(remoteAddr string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/login", nil)
+		req.RemoteAddr = remoteAddr
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := request("192.0.2.10:1000"); rec.Code != http.StatusNoContent {
+		t.Fatalf("first request status = %d", rec.Code)
+	}
+	if rec := request("192.0.2.10:1001"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status = %d, want 429", rec.Code)
+	} else if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("rate-limited login omitted Retry-After")
+	}
+	if rec := request("192.0.2.11:1000"); rec.Code != http.StatusNoContent {
+		t.Fatalf("independent client status = %d", rec.Code)
+	}
+}
+
 // --- QueueDepthTracker tests ---
 
 func TestQueueDepthTrackerIncrementDecrement(t *testing.T) {

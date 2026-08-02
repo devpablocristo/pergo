@@ -130,16 +130,17 @@ func (r *MessageIngressLedgerRepository) Claim(
 		&retrySeconds,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// The insert can lose to the global trace_id uniqueness constraint even
-		// when the idempotency key itself is new. Treat that as an identity
+		// The insert can lose to the workspace trace_id uniqueness constraint
+		// even when the idempotency key itself is new. Treat that as an identity
 		// collision instead of allowing two NATS publishes with one trace.
 		var conflictingKey string
 		conflictErr := tx.QueryRow(ctx, `
 			SELECT idempotency_key
 			FROM message_ingress_ledger
-			WHERE trace_id = $1
+			WHERE workspace_id = $1
+			  AND trace_id = $2
 			FOR UPDATE
-		`, traceID).Scan(&conflictingKey)
+		`, workspaceID, traceID).Scan(&conflictingKey)
 		if conflictErr == nil {
 			return uuid.Nil, time.Time{}, uuid.Nil, 0, false, 0, ErrIngressIdempotencyKeyReused
 		}

@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -12,10 +13,25 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+// ErrMediaDisabled is returned when media storage was explicitly disabled.
+var ErrMediaDisabled = errors.New("media_disabled")
+
 // S3Client wraps the AWS SDK v2 S3 client.
 type S3Client struct {
-	Client *s3.Client
-	Bucket string
+	Client   *s3.Client
+	Bucket   string
+	disabled bool
+}
+
+// NewDisabledS3Client returns a fail-closed storage adapter. It is safe to pass
+// through existing media dependencies; every read/write is rejected.
+func NewDisabledS3Client() *S3Client {
+	return &S3Client{disabled: true}
+}
+
+// Enabled reports whether media reads and writes are available.
+func (s *S3Client) Enabled() bool {
+	return s != nil && !s.disabled && s.Client != nil
 }
 
 // NewS3Client creates and configures a new S3Client.
@@ -46,6 +62,9 @@ func NewS3Client(endpoint, region, accessKey, secretKey, bucket string, usePathS
 
 // Upload stores bytes in S3.
 func (s *S3Client) Upload(ctx context.Context, key string, data []byte, contentType string) error {
+	if !s.Enabled() {
+		return ErrMediaDisabled
+	}
 	_, err := s.Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.Bucket),
 		Key:         aws.String(key),
@@ -60,6 +79,9 @@ func (s *S3Client) Upload(ctx context.Context, key string, data []byte, contentT
 
 // Download retrieves file stream from S3.
 func (s *S3Client) Download(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	if !s.Enabled() {
+		return nil, "", ErrMediaDisabled
+	}
 	out, err := s.Client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.Bucket),
 		Key:    aws.String(key),

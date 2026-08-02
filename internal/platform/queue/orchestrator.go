@@ -38,6 +38,7 @@ const (
 	deliveryTerminalCode   = "DELIVERY_TERMINAL"
 	deliveryTransientCode  = "DELIVERY_TRANSIENT"
 	deliveryUncertainCode  = "DELIVERY_UNCERTAIN"
+	deliveryRetriesCode    = "DELIVERY_RETRIES_EXHAUSTED"
 )
 
 // DispatchOrchestrator owns all outbound dispatch logic: idempotency,
@@ -96,6 +97,11 @@ func (o *DispatchOrchestrator) Process(
 ) error {
 	traceID := qMsg.TraceID
 	workspaceID := qMsg.WorkspaceID
+	if o.dispatchRepo != nil {
+		// JetStream delivery count also includes scheduler deferrals. Until a
+		// fenced database claim exists there is no provider attempt to charge.
+		attempt = 0
+	}
 
 	// --- Database State Check / Idempotency ---
 	var dispatch *repository.MessageDispatch
@@ -161,7 +167,18 @@ func (o *DispatchOrchestrator) Process(
 				return err
 			}
 		}
+		// PostgreSQL claim generations count actual provider dispatch rights.
+		// Broker redeliveries used only for fair scheduling must not consume the
+		// provider retry budget.
+		if deliveryClaim.Generation > 0 {
+			attempt = int(deliveryClaim.Generation - 1)
+		}
 		if dispatch.Status == "queued" {
+			if err := o.dispatchRepo.EnsureDispatchWebhookEvent(ctx, dispatch.ID, "queued", nil); err != nil {
+				slog.Error("orchestrator: failed to persist queued webhook event", "error", err, "trace_id", traceID)
+				o.handleFailure(msg, workspaceID, traceID, attempt)
+				return err
+			}
 			o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "queued", qMsg.Channel, nil)
 		}
 	}
@@ -226,7 +243,28 @@ func (o *DispatchOrchestrator) Process(
 
 		if o.dispatchRepo != nil && dispatch != nil {
 			var err error
-			deliveryClaim, err = o.dispatchRepo.RenewDeliveryClaim(ctx, dispatch.ID, deliveryClaim, orchDeliveryLease)
+			if deliveryClaim.Token == uuid.Nil {
+				var retryAfter time.Duration
+				deliveryClaim, retryAfter, err = o.dispatchRepo.ClaimDelivery(ctx, dispatch.ID, orchDeliveryLease)
+				if errors.Is(err, repository.ErrDispatchClaimActive) {
+					if retryAfter <= 0 {
+						retryAfter = time.Second
+					}
+					if nakErr := msg.NakWithDelay(retryAfter); nakErr != nil {
+						slog.Error("orchestrator: failed to defer fallback claim", "error", nakErr, "trace_id", traceID)
+					}
+					return err
+				}
+				if errors.Is(err, repository.ErrDispatchTerminal) {
+					o.ack(msg, workspaceID)
+					return nil
+				}
+				if err == nil && deliveryClaim.Generation > 0 {
+					attempt = int(deliveryClaim.Generation - 1)
+				}
+			} else {
+				deliveryClaim, err = o.dispatchRepo.RenewDeliveryClaim(ctx, dispatch.ID, deliveryClaim, orchDeliveryLease)
+			}
 			if err != nil {
 				slog.Error("orchestrator: failed to renew provider delivery claim", "error", err, "trace_id", traceID)
 				o.handleFailure(msg, workspaceID, traceID, attempt)
@@ -336,11 +374,72 @@ func (o *DispatchOrchestrator) Process(
 				payloadBytes, _ := json.Marshal(auditPayload)
 				_ = o.auditWriter.Write(audit.NewEvent(workspaceID, traceID, "outbound_message", payloadBytes))
 			}
+			if i+1 < len(allChannels) && o.dispatchRepo != nil && dispatch != nil {
+				nextIndex := i + 1
+				errMsg := deliveryTerminalCode
+				if stateErr := o.dispatchRepo.UpdateClaimedDelivery(
+					ctx,
+					dispatch.ID,
+					deliveryClaim,
+					"failed_transient",
+					channelName,
+					nextIndex,
+					&errMsg,
+					nil,
+					true,
+				); stateErr != nil {
+					slog.Error(
+						"orchestrator: failed to persist safe fallback progress",
+						"error", stateErr,
+						"trace_id", traceID,
+						"next_index", nextIndex,
+					)
+					o.handleFailure(msg, workspaceID, traceID, attempt)
+					return stateErr
+				}
+				// The terminal provider result is known and safe. Release the
+				// old fence so a crash resumes at the persisted next channel
+				// instead of misclassifying the completed call as uncertain.
+				deliveryClaim = repository.DispatchClaim{}
+			}
 			continue
 		}
 
 		// Transient error — NAK with delay, JetStream retries
 		errMsg := deliveryTransientCode
+		if attempt >= o.maxRetries {
+			errMsg = deliveryRetriesCode
+			if o.dispatchRepo != nil && dispatch != nil {
+				if stateErr := o.dispatchRepo.UpdateClaimedDelivery(
+					ctx, dispatch.ID, deliveryClaim, "failed", channelName, i, &errMsg, nil, true,
+				); stateErr != nil {
+					slog.Error("orchestrator: failed to persist exhausted delivery retries", "error", stateErr, "trace_id", traceID)
+					if nakErr := msg.NakWithDelay(time.Second); nakErr != nil {
+						slog.Error("orchestrator: failed to defer exhausted delivery persistence", "error", nakErr, "trace_id", traceID)
+					}
+					return stateErr
+				}
+				o.publishWebhookEvent(ctx, workspaceID, traceID, dispatchReceiptID(dispatch), "failed", channelName, &errMsg)
+			}
+			slog.Error(
+				"orchestrator: transient provider retries exhausted",
+				"channel", channelName,
+				"error_code", deliveryRetriesCode,
+				"trace_id", traceID,
+				"attempt", attempt,
+			)
+			if o.auditWriter != nil {
+				auditPayload := map[string]any{
+					"request": qMsg,
+					"status":  "failed",
+					"error":   deliveryRetriesCode,
+				}
+				payloadBytes, _ := json.Marshal(auditPayload)
+				_ = o.auditWriter.Write(audit.NewEvent(workspaceID, traceID, "outbound_message", payloadBytes))
+			}
+			o.ack(msg, workspaceID)
+			return err
+		}
 		if o.dispatchRepo != nil && dispatch != nil {
 			if stateErr := o.dispatchRepo.UpdateClaimedDelivery(
 				ctx, dispatch.ID, deliveryClaim, "failed_transient", channelName, i, &errMsg, nil, true,
@@ -493,8 +592,13 @@ func (o *DispatchOrchestrator) isExpired(qMsg *domain.QueueMessage) bool {
 	return time.Now().UTC().After(expiry)
 }
 
-// retryAttempt extracts the retry attempt count from message headers.
+// retryAttempt obtains the zero-based broker delivery attempt. JetStream
+// metadata is authoritative because NAK redeliveries do not mutate headers.
+// The header fallback only supports non-JetStream adapters during migration.
 func retryAttempt(msg DispatchMessage) int {
+	if attempt, ok := msg.DeliveryAttempt(); ok {
+		return attempt
+	}
 	headers := msg.Headers()
 	if headers == nil {
 		return 0

@@ -2,10 +2,12 @@ package queue
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,71 +39,61 @@ type WebhookWorker struct {
 	subRepo          *repository.WebhookSubscriptionRepository
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
-	done             chan struct{}
+	contextsMu       sync.Mutex
+	messageContexts  map[string]jetstream.MessagesContext
+	stopped          bool
+	stopOnce         sync.Once
 }
 
-func NewWebhookWorker(ctx context.Context, nc *nats.Conn, dispatcher webhook.WebhookDispatcher, subRepo *repository.WebhookSubscriptionRepository) (*WebhookWorker, error) {
+const (
+	webhookAckWait           = 2 * time.Minute
+	webhookHeartbeatInterval = 30 * time.Second
+)
+
+func NewWebhookWorker(ctx context.Context, nc *nats.Conn, dispatcher webhook.WebhookDispatcher, subRepo *repository.WebhookSubscriptionRepository, replicas ...int) (*WebhookWorker, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("jetstream.New: %w", err)
 	}
 
-	// Ensure WEBHOOKS stream exists
-	stream, err := EnsureWebhookStream(ctx, nc)
+	// Streams and consumers are created only by the migration/bootstrap job.
+	stream, err := BindVersionedStream(ctx, nc, WebhookStreamName, WebhookStreamSubject, replicas...)
 	if err != nil {
-		return nil, fmt.Errorf("ensure webhook stream: %w", err)
+		return nil, fmt.Errorf("bind webhook stream: %w", err)
 	}
 
-	// Create pull consumer
-	consumer, err := createConsumerWithRetry(ctx, stream, jetstream.ConsumerConfig{
-		Durable:       "webhooks-consumer",
-		Description:   "Webhook delivery worker consumer",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       15 * time.Second,
-		MaxDeliver:    10,
-		FilterSubject: "webhooks.events",
-	})
+	consumer, err := BindConsumer(ctx, stream, WebhookEventConsumerName, WebhookStreamSubject)
 	if err != nil {
-		return nil, fmt.Errorf("create webhook consumer: %w", err)
+		return nil, fmt.Errorf("bind webhook consumer: %w", err)
 	}
 
-	// Ensure INBOUND stream exists
-	inboundStream, err := EnsureInboundStream(ctx, nc)
+	inboundStream, err := BindVersionedStream(ctx, nc, InboundStreamName, InboundStreamSubject, replicas...)
 	if err != nil {
-		return nil, fmt.Errorf("ensure inbound stream: %w", err)
+		return nil, fmt.Errorf("bind inbound stream: %w", err)
 	}
 
-	// Create inbound consumer
-	inboundConsumer, err := createConsumerWithRetry(ctx, inboundStream, jetstream.ConsumerConfig{
-		Durable:       "inbound-webhooks-consumer",
-		Description:   "Inbound webhook delivery worker consumer",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       15 * time.Second,
-		MaxDeliver:    10,
-		FilterSubject: "inbound.events.>",
-	})
+	inboundConsumer, err := BindConsumer(ctx, inboundStream, InboundEventConsumerName, InboundStreamSubject)
 	if err != nil {
-		return nil, fmt.Errorf("create inbound webhook consumer: %w", err)
+		return nil, fmt.Errorf("bind inbound webhook consumer: %w", err)
 	}
 
-	// Ensure WEBHOOK_DELIVERIES stream exists
-	deliveryStream, err := EnsureWebhookDeliveryStream(ctx, nc)
+	deliveryStream, err := BindVersionedStream(
+		ctx,
+		nc,
+		WebhookDeliveryStreamName,
+		WebhookDeliverySubject,
+		replicas...,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("ensure webhook delivery stream: %w", err)
+		return nil, fmt.Errorf("bind webhook delivery stream: %w", err)
 	}
 
-	// Create delivery consumer
-	deliveryConsumer, err := createConsumerWithRetry(ctx, deliveryStream, jetstream.ConsumerConfig{
-		Durable:       "webhooks-deliveries-consumer",
-		Description:   "Webhook delivery task worker consumer",
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       15 * time.Second,
-		MaxDeliver:    10,
-		FilterSubject: "webhooks.deliveries.>",
-	})
+	deliveryConsumer, err := BindConsumer(
+		ctx,
+		deliveryStream,
+		WebhookDeliveryConsumerName,
+		WebhookDeliverySubject,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create webhook delivery consumer: %w", err)
 	}
@@ -116,7 +108,7 @@ func NewWebhookWorker(ctx context.Context, nc *nats.Conn, dispatcher webhook.Web
 		dispatcher:       dispatcher,
 		subRepo:          subRepo,
 		cancel:           cancel,
-		done:             make(chan struct{}),
+		messageContexts:  make(map[string]jetstream.MessagesContext, 3),
 	}
 
 	w.wg.Add(3)
@@ -127,7 +119,19 @@ func NewWebhookWorker(ctx context.Context, nc *nats.Conn, dispatcher webhook.Web
 }
 
 func (w *WebhookWorker) Stop() {
-	w.cancel()
+	w.stopOnce.Do(func() {
+		w.cancel()
+		w.contextsMu.Lock()
+		w.stopped = true
+		contexts := make([]jetstream.MessagesContext, 0, len(w.messageContexts))
+		for _, msgCtx := range w.messageContexts {
+			contexts = append(contexts, msgCtx)
+		}
+		w.contextsMu.Unlock()
+		for _, msgCtx := range contexts {
+			msgCtx.Stop()
+		}
+	})
 	w.wg.Wait()
 }
 
@@ -139,34 +143,75 @@ func (w *WebhookWorker) run(ctx context.Context, cons jetstream.Consumer, mode s
 	defer w.wg.Done()
 	slog.Info("webhook worker thread started", "mode", mode)
 
+	msgCtx, err := cons.Messages()
+	if err != nil {
+		slog.Error("webhook worker: failed to create messages context", "error", err, "mode", mode)
+		return
+	}
+	if !w.installMessagesContext(mode, msgCtx) {
+		return
+	}
+	defer func() {
+		msgCtx.Stop()
+		w.clearMessagesContext(mode)
+	}()
+
 	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("webhook worker thread stopping", "mode", mode)
-			return
-		default:
-			msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
-			if err != nil {
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					continue
-				}
-				slog.Error("webhook worker: fetch error", "error", err, "mode", mode)
-				time.Sleep(1 * time.Second)
+		msg, err := msgCtx.Next()
+		if err != nil {
+			if ctx.Err() != nil {
+				slog.Info("webhook worker thread stopping", "mode", mode)
+				return
+			}
+			slog.Error("webhook worker: messages context failed", "error", err, "mode", mode)
+			msgCtx.Stop()
+			w.clearMessagesContext(mode)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+			next, nextErr := cons.Messages()
+			if nextErr != nil {
+				slog.Error("webhook worker: failed to recreate messages context", "error", nextErr, "mode", mode)
 				continue
 			}
-
-			for msg := range msgs.Messages() {
-				if mode == "delivery" {
-					w.processDelivery(ctx, msg)
-				} else {
-					w.processEvent(ctx, msg, mode)
-				}
+			if !w.installMessagesContext(mode, next) {
+				return
 			}
+			msgCtx = next
+			continue
+		}
+
+		if mode == "delivery" {
+			w.processDelivery(ctx, msg)
+		} else {
+			w.processEvent(ctx, msg, mode)
 		}
 	}
 }
 
+func (w *WebhookWorker) installMessagesContext(mode string, msgCtx jetstream.MessagesContext) bool {
+	w.contextsMu.Lock()
+	defer w.contextsMu.Unlock()
+	if w.stopped {
+		msgCtx.Stop()
+		return false
+	}
+	w.messageContexts[mode] = msgCtx
+	return true
+}
+
+func (w *WebhookWorker) clearMessagesContext(mode string) {
+	w.contextsMu.Lock()
+	delete(w.messageContexts, mode)
+	w.contextsMu.Unlock()
+}
+
 func (w *WebhookWorker) processEvent(ctx context.Context, msg jetstream.Msg, mode string) {
+	stopHeartbeat := maintainAckLease(ctx, msg)
+	defer stopHeartbeat()
+
 	var evt WebhookEvent
 	if err := json.Unmarshal(msg.Data(), &evt); err != nil {
 		slog.Error("webhook worker: failed to unmarshal event", "error", err)
@@ -197,8 +242,9 @@ func (w *WebhookWorker) processEvent(ctx context.Context, msg jetstream.Msg, mod
 		}
 
 		if webhook.MatchesAny(sub.EventTypes, evt.Event) {
+			deliveryID := deterministicWebhookDeliveryID(mode, wsID, sub.ID, evt, msg.Data())
 			task := webhook.WebhookDeliveryTask{
-				ID:             uuid.New(),
+				ID:             deliveryID,
 				SubscriptionID: sub.ID,
 				WorkspaceID:    wsID,
 				Event:          evt.Event,
@@ -214,7 +260,7 @@ func (w *WebhookWorker) processEvent(ctx context.Context, msg jetstream.Msg, mod
 				continue
 			}
 
-			subject := fmt.Sprintf("webhooks.deliveries.%s.%s", wsID, sub.ID)
+			subject := fmt.Sprintf("webhooks.deliveries.%s", wsID)
 			err = publisher.Publish(ctx, subject, taskData, task.ID.String())
 			if err != nil {
 				slog.Error("webhook worker: failed to publish delivery task", "error", err, "subject", subject)
@@ -229,6 +275,9 @@ func (w *WebhookWorker) processEvent(ctx context.Context, msg jetstream.Msg, mod
 }
 
 func (w *WebhookWorker) processDelivery(ctx context.Context, msg jetstream.Msg) {
+	stopHeartbeat := maintainAckLease(ctx, msg)
+	defer stopHeartbeat()
+
 	var task webhook.WebhookDeliveryTask
 	if err := json.Unmarshal(msg.Data(), &task); err != nil {
 		slog.Error("webhook worker: failed to unmarshal delivery task", "error", err)
@@ -239,7 +288,7 @@ func (w *WebhookWorker) processDelivery(ctx context.Context, msg jetstream.Msg) 
 	err := w.dispatcher.Dispatch(ctx, task)
 	if err != nil {
 		slog.Warn("webhook worker: delivery dispatch failed", "error", err, "trace_id", task.TraceID, "subscription_id", task.SubscriptionID)
-		w.handleDeliveryRetry(msg, err, &task)
+		w.handleDeliveryRetry(ctx, msg, err, &task)
 		return
 	}
 
@@ -247,7 +296,53 @@ func (w *WebhookWorker) processDelivery(ctx context.Context, msg jetstream.Msg) 
 	_ = msg.Ack()
 }
 
-func (w *WebhookWorker) handleDeliveryRetry(msg jetstream.Msg, err error, task *webhook.WebhookDeliveryTask) {
+func deterministicWebhookDeliveryID(
+	mode string,
+	workspaceID uuid.UUID,
+	subscriptionID uuid.UUID,
+	event WebhookEvent,
+	payload []byte,
+) uuid.UUID {
+	payloadDigest := sha256.Sum256(payload)
+	identity := strings.Join([]string{
+		"pergo-webhook-delivery-v2",
+		mode,
+		workspaceID.String(),
+		subscriptionID.String(),
+		event.Event,
+		event.TraceID,
+		event.MessageID,
+		fmt.Sprintf("%x", payloadDigest),
+	}, "\x1f")
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity))
+}
+
+func maintainAckLease(ctx context.Context, msg jetstream.Msg) func() {
+	_ = msg.InProgress()
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(webhookHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				if err := msg.InProgress(); err != nil {
+					slog.Warn("webhook worker: failed to renew message ack lease", "error", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (w *WebhookWorker) handleDeliveryRetry(ctx context.Context, msg jetstream.Msg, err error, task *webhook.WebhookDeliveryTask) {
 	numDelivered := uint64(1)
 	if meta, metadataErr := msg.Metadata(); metadataErr == nil && meta != nil {
 		numDelivered = meta.NumDelivered
@@ -262,7 +357,8 @@ func (w *WebhookWorker) handleDeliveryRetry(msg jetstream.Msg, err error, task *
 			isTerminalErr = true
 		}
 	}
-	if errors.Is(err, webhook.ErrSubscriptionNotFound) || errors.Is(err, webhook.ErrSubscriptionInactive) {
+	if errors.Is(err, webhook.ErrSubscriptionNotFound) ||
+		errors.Is(err, webhook.ErrSubscriptionInactive) {
 		isTerminalErr = true
 	}
 
@@ -272,8 +368,10 @@ func (w *WebhookWorker) handleDeliveryRetry(msg jetstream.Msg, err error, task *
 		failReason := err.Error()
 
 		// Archive permanently failed event via WebhookDispatcher
+		dlqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
 		dlqErr := w.dispatcher.WriteToDLQ(
-			context.Background(),
+			dlqCtx,
 			task.WorkspaceID,
 			task.SubscriptionID,
 			task.TraceID,

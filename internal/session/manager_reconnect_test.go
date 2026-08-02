@@ -23,6 +23,29 @@ type reconnectStore struct {
 	statuses    []string
 }
 
+type blockingCleanupStore struct {
+	reconnectStore
+	cleanupStarted chan struct{}
+	releaseCleanup chan struct{}
+	cleanupOnce    sync.Once
+}
+
+func (s *blockingCleanupStore) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	if err := s.reconnectStore.UpdateStatus(ctx, id, status); err != nil {
+		return err
+	}
+	if status != string(DeviceStatusDisconnected) {
+		return nil
+	}
+	s.cleanupOnce.Do(func() { close(s.cleanupStarted) })
+	select {
+	case <-s.releaseCleanup:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *reconnectStore) Create(context.Context, *repository.Connection) error { return nil }
 func (s *reconnectStore) GetByID(context.Context, uuid.UUID) (*repository.Connection, error) {
 	return nil, nil
@@ -152,6 +175,130 @@ func TestStopAllCancelsReconnectBackoff(t *testing.T) {
 	}
 }
 
+func TestReconnectAllKeepsRestoredSessionAliveUntilStop(t *testing.T) {
+	jid := "12345:1@s.whatsapp.net"
+	store := &reconnectStore{connections: []*repository.Connection{{
+		ID:      uuid.New(),
+		Channel: "whatsapp",
+		JID:     &jid,
+		Status:  string(DeviceStatusDisconnected),
+	}}}
+	fake := &reconnectFakeClient{disconnected: make(chan struct{})}
+	manager := &Manager{
+		repo:          store,
+		registry:      NewActiveSession(),
+		clientFactory: fakeFactory(fake),
+		wait:          func(context.Context, time.Duration) bool { return true },
+		initialJitter: func() time.Duration { return 0 },
+	}
+	manager.reconnect = manager.reconnectDevice
+
+	if err := manager.ReconnectAll(context.Background()); err != nil {
+		t.Fatalf("ReconnectAll returned error: %v", err)
+	}
+	if got := manager.registry.Len(); got != 1 {
+		t.Fatalf("active sessions after startup pass = %d, want 1", got)
+	}
+	select {
+	case <-fake.disconnected:
+		t.Fatal("restored session disconnected when finite startup pass returned")
+	default:
+	}
+
+	manager.StopAll()
+	select {
+	case <-fake.disconnected:
+	default:
+		t.Fatal("StopAll returned before restored client disconnected")
+	}
+	if got := manager.registry.Len(); got != 0 {
+		t.Fatalf("active sessions after StopAll = %d, want 0", got)
+	}
+}
+
+func TestStopAllWaitsForSessionCleanup(t *testing.T) {
+	jid := "12345:1@s.whatsapp.net"
+	store := &blockingCleanupStore{
+		cleanupStarted: make(chan struct{}),
+		releaseCleanup: make(chan struct{}),
+	}
+	fake := &reconnectFakeClient{disconnected: make(chan struct{})}
+	manager := &Manager{
+		repo:          store,
+		registry:      NewActiveSession(),
+		clientFactory: fakeFactory(fake),
+	}
+	if err := manager.reconnectDevice(context.Background(), &repository.Connection{
+		ID:      uuid.New(),
+		Channel: "whatsapp",
+		JID:     &jid,
+	}); err != nil {
+		t.Fatalf("reconnectDevice: %v", err)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		manager.StopAll()
+		close(stopped)
+	}()
+
+	select {
+	case <-store.cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("session cleanup did not start")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("StopAll returned before session cleanup completed")
+	default:
+	}
+	close(store.releaseCleanup)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("StopAll did not return after session cleanup completed")
+	}
+}
+
+func TestPairingSuccessWaitsOnAlreadyConnectedClientWithoutReconnect(t *testing.T) {
+	jid, err := types.ParseJID("12345:1@s.whatsapp.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &reconnectFakeClient{
+		jid:          jid,
+		disconnected: make(chan struct{}),
+	}
+	manager := &Manager{
+		repo:     &reconnectStore{},
+		registry: NewActiveSession(),
+	}
+
+	if err := manager.onPairingSuccess(
+		context.Background(),
+		fake,
+		uuid.New(),
+		"5491112345678",
+		nil,
+		"",
+	); err != nil {
+		t.Fatalf("onPairingSuccess: %v", err)
+	}
+	if got := fake.connectCalls.Load(); got != 0 {
+		t.Fatalf("paired client Connect calls = %d, want 0", got)
+	}
+	if got := manager.registry.Len(); got != 1 {
+		t.Fatalf("active sessions after pairing = %d, want 1", got)
+	}
+
+	manager.StopAll()
+	select {
+	case <-fake.disconnected:
+	default:
+		t.Fatal("StopAll returned before paired client disconnected")
+	}
+}
+
 func TestCalcBackoffUsesJitterAndCap(t *testing.T) {
 	const jitter = 0.1
 	for _, attempt := range []int{0, 1, 2, 10} {
@@ -234,6 +381,7 @@ type reconnectFakeClient struct {
 	connectErr   error
 	disconnected chan struct{}
 	handler      whatsmeow.EventHandler
+	connectCalls atomic.Int32
 }
 
 func fakeFactory(client *reconnectFakeClient) whatsapp.ClientFactory {
@@ -256,7 +404,10 @@ func (c *reconnectFakeClient) Wait(ctx context.Context) {
 func (c *reconnectFakeClient) GetQRChannel(context.Context) (<-chan whatsmeow.QRChannelItem, error) {
 	return nil, errors.New("QR pairing unavailable in reconnect fake")
 }
-func (c *reconnectFakeClient) Connect() error { return c.connectErr }
+func (c *reconnectFakeClient) Connect() error {
+	c.connectCalls.Add(1)
+	return c.connectErr
+}
 func (c *reconnectFakeClient) Disconnect() {
 	select {
 	case <-c.disconnected:

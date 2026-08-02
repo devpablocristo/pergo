@@ -65,6 +65,13 @@ func TestContactRepository(t *testing.T) {
 		resolvedContacts := make([]uuid.UUID, numGoroutines)
 
 		senderID := "concurrent-sender-99"
+		var contactsBefore int
+		if err := pool.QueryRow(ctx,
+			"SELECT COUNT(*) FROM contacts WHERE workspace_id = $1",
+			ws.ID,
+		).Scan(&contactsBefore); err != nil {
+			t.Fatalf("count contacts before concurrent resolve: %v", err)
+		}
 
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
@@ -97,6 +104,50 @@ func TestContactRepository(t *testing.T) {
 			} else if firstID != id {
 				t.Errorf("concurrency check: expected all goroutines to get the same contact ID, but got %s and %s", firstID, id)
 			}
+		}
+
+		var contactsAfter int
+		if err := pool.QueryRow(ctx,
+			"SELECT COUNT(*) FROM contacts WHERE workspace_id = $1",
+			ws.ID,
+		).Scan(&contactsAfter); err != nil {
+			t.Fatalf("count contacts after concurrent resolve: %v", err)
+		}
+		if want := contactsBefore + 1; contactsAfter != want {
+			t.Errorf("expected concurrent resolve to create exactly one contact: got %d total, want %d", contactsAfter, want)
+		}
+
+		var identityCount int
+		var canonicalID uuid.UUID
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*), MIN(contact_id::text)::uuid
+			FROM contact_identities
+			WHERE workspace_id = $1 AND channel = 'whatsapp' AND sender_identity = $2
+		`, ws.ID, senderID).Scan(&identityCount, &canonicalID); err != nil {
+			t.Fatalf("load canonical concurrent identity: %v", err)
+		}
+		if identityCount != 1 {
+			t.Errorf("expected one tenant-scoped identity, got %d", identityCount)
+		}
+		if firstID != uuid.Nil && canonicalID != firstID {
+			t.Errorf("returned contact %s does not own canonical identity %s", firstID, canonicalID)
+		}
+
+		var orphanCount int
+		if err := pool.QueryRow(ctx, `
+			SELECT COUNT(*)
+			FROM contacts c
+			WHERE c.workspace_id = $1
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM contact_identities ci
+			      WHERE ci.workspace_id = c.workspace_id AND ci.contact_id = c.id
+			  )
+		`, ws.ID).Scan(&orphanCount); err != nil {
+			t.Fatalf("count orphan contacts: %v", err)
+		}
+		if orphanCount != 0 {
+			t.Errorf("expected no orphan contacts after concurrent resolve, got %d", orphanCount)
 		}
 	})
 

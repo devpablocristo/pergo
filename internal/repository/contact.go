@@ -72,8 +72,10 @@ func (r *ContactRepository) ResolveContact(
 
 	if err == nil {
 		_, err = r.pool.Exec(ctx, `
-			UPDATE contacts SET closed_at = NULL, updated_at = NOW() WHERE id = $1 AND closed_at IS NOT NULL
-		`, contactID)
+			UPDATE contacts
+			SET closed_at = NULL, updated_at = NOW()
+			WHERE workspace_id = $1 AND id = $2 AND closed_at IS NOT NULL
+		`, workspaceID, contactID)
 		if err != nil {
 			return nil, err
 		}
@@ -98,34 +100,49 @@ func (r *ContactRepository) ResolveContact(
 
 	if err == nil {
 		_, err = tx.Exec(ctx, `
-			UPDATE contacts SET closed_at = NULL, updated_at = NOW() WHERE id = $1 AND closed_at IS NOT NULL
-		`, contactID)
+			UPDATE contacts
+			SET closed_at = NULL, updated_at = NOW()
+			WHERE workspace_id = $1 AND id = $2 AND closed_at IS NOT NULL
+		`, workspaceID, contactID)
 		if err != nil {
 			return nil, err
 		}
-		_ = tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
 		return r.GetByID(ctx, workspaceID, contactID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("recheck contact identity: %w", err)
 	}
 
 	// Try cross-linking check: check if username or phone are already linked to a contact
 	if channel == "telegram" && username != "" {
 		cleanUser := strings.ToLower(strings.TrimPrefix(username, "@"))
-		_ = tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			SELECT contact_id FROM contact_identities 
 			WHERE workspace_id = $1 AND channel = 'telegram_username' AND LOWER(sender_identity) = $2
 		`, workspaceID, cleanUser).Scan(&contactID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("resolve telegram username identity: %w", err)
+		}
 	}
 
 	if contactID == uuid.Nil && phone != "" {
-		_ = tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			SELECT contact_id FROM contact_identities 
 			WHERE workspace_id = $1 AND (channel = 'phone' OR channel = 'whatsapp' OR channel = 'whatsapp_cloud') AND sender_identity = $2
 		`, workspaceID, phone).Scan(&contactID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("resolve phone identity: %w", err)
+		}
 	}
 
 	// If still no contact matched, we create a new one
+	createdContactID := uuid.Nil
 	if contactID == uuid.Nil {
 		contactID = uuid.New()
+		createdContactID = contactID
 		displayName := name
 		if displayName == "" {
 			displayName = senderIdentity
@@ -141,21 +158,48 @@ func (r *ContactRepository) ResolveContact(
 	} else {
 		// Reset closed_at if we matched an existing contact via cross-linking
 		_, err = tx.Exec(ctx, `
-			UPDATE contacts SET closed_at = NULL, updated_at = NOW() WHERE id = $1 AND closed_at IS NOT NULL
-		`, contactID)
+			UPDATE contacts
+			SET closed_at = NULL, updated_at = NOW()
+			WHERE workspace_id = $1 AND id = $2 AND closed_at IS NOT NULL
+		`, workspaceID, contactID)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	// Link primary identity
-	_, err = tx.Exec(ctx, `
+	// Claim the primary identity and always use the contact that owns the unique
+	// workspace/channel/sender tuple. A concurrent resolver may have committed
+	// that tuple after our transaction-level recheck.
+	var canonicalContactID uuid.UUID
+	err = tx.QueryRow(ctx, `
 		INSERT INTO contact_identities (contact_id, workspace_id, channel, sender_identity, created_at)
 		VALUES ($1, $2, $3, $4, NOW())
-		ON CONFLICT (workspace_id, channel, sender_identity) DO NOTHING
-	`, contactID, workspaceID, channel, senderIdentity)
+		ON CONFLICT (workspace_id, channel, sender_identity)
+		DO UPDATE SET sender_identity = EXCLUDED.sender_identity
+		RETURNING contact_id
+	`, contactID, workspaceID, channel, senderIdentity).Scan(&canonicalContactID)
 	if err != nil {
 		return nil, fmt.Errorf("link contact identity: %w", err)
+	}
+
+	if createdContactID != uuid.Nil && canonicalContactID != createdContactID {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM contacts
+			WHERE workspace_id = $1 AND id = $2
+		`, workspaceID, createdContactID); err != nil {
+			return nil, fmt.Errorf("delete losing contact profile: %w", err)
+		}
+	}
+	contactID = canonicalContactID
+
+	// The canonical contact might have been closed while another resolver won
+	// the identity race, so reopen it inside the same transaction.
+	if _, err := tx.Exec(ctx, `
+		UPDATE contacts
+		SET closed_at = NULL, updated_at = NOW()
+		WHERE workspace_id = $1 AND id = $2 AND closed_at IS NOT NULL
+	`, workspaceID, contactID); err != nil {
+		return nil, fmt.Errorf("reopen canonical contact: %w", err)
 	}
 
 	// Link username (for telegram)

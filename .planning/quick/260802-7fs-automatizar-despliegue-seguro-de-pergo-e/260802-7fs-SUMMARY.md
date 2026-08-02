@@ -21,7 +21,7 @@ omitir el audit final y nunca provisiona Synadia/NATS.
 ## Validación
 
 - `make deploy-gcp-test`
-- `bash -n` sobre los siete scripts shell
+- `bash -n` sobre los ocho scripts shell
 - `go test ./cmd/pergo -run 'TestRuntimeProfile(RouteIsolation|ProcessRoles)' -count=1`
 - `git diff --check`
 - Gitleaks sobre scripts, runbook y artefactos GSD

@@ -9,4 +9,3 @@ for argument in "$@"; do
   fi
 done
 exit 0
-

@@ -17,8 +17,8 @@ A single API request delivers a message through any configured channel with auto
 
 ## Current State
 
-- **Shipped Version**: v1.4 (2026-07-20)
-- **Status**: Stable. Fully functional multi-tenant routing gateway with interactive message schema mapping, Telegram threads and inline keyboards, Instagram Stories, active contact profiles, multi-webhook subscriptions, sequential JSON Response Verbs engine, Meta WABA read receipt indicators, and built-in Chatwoot and Typebot integrations with stateful human/bot handoff control.
+- **Shipped Version**: v1.5 (2026-07-24)
+- **Status**: Stable. Fully functional multi-tenant routing gateway with SMTP, Amazon SES and Mautic email delivery, signed open/click tracking, interactive message schema mapping, Telegram threads and inline keyboards, Instagram Stories, active contact profiles, multi-webhook subscriptions, sequential JSON Response Verbs engine, Meta WABA read receipt indicators, and built-in Chatwoot and Typebot integrations with stateful human/bot handoff control.
 
 <details>
 <summary>Archived State (v1.3)</summary>
@@ -32,6 +32,8 @@ A single API request delivers a message through any configured channel with auto
 
 ### Validated
 
+- ✓ Email Channels: SMTP, Amazon SES and Mautic providers behind the email dispatcher (EMAIL-01, EMAIL-02) — Phase 28
+- ✓ Email Tracking: HMAC-signed open pixels, click redirects and provider event normalization (TRACK-01) — Phase 28
 - ✓ Omnichannel Interactive Schema & Routing: unified Interactive schema, JSON-to-Protobuf mapping, and `channel_overrides` fallback for vendor-specific payload structures (WABA-01) — Phase 25
 - ✓ Telegram Integration: mapped Telegram inline keyboards and threaded message routing (TELE-01) — Phase 26
 - ✓ Instagram Integration: handled inbound IG Stories and mapped generic Quick Replies (INSTA-01) — Phase 27
@@ -155,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-20 after v1.4 milestone completion*
+*Last updated: 2026-08-02 after v1.5 milestone reconciliation*

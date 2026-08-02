@@ -17,4 +17,3 @@ case "$url" in
     exit 5
     ;;
 esac
-

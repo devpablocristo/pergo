@@ -1,5 +1,5 @@
 ---
-status: in_progress
+status: complete
 task: Harden PerGo runtime profiles, webhook verification, KEK, NATS, media, and shutdown for Cloud Run
 ---
 

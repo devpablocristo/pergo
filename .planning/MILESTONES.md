@@ -1,5 +1,17 @@
 # Milestones
 
+## v1.5 Email Channels & Tracking Engine (Shipped: 2026-07-24)
+
+**Phases completed:** 1 phase, 2 plans, 6 tasks
+
+**Key accomplishments:**
+
+- Added SMTP, Amazon SES and Mautic providers behind the unified email dispatcher.
+- Added multipart MIME generation and the email channel variants to the public domain model.
+- Added HMAC-signed open/click tracking and normalized SES/Mautic delivery events.
+
+---
+
 ## v1.4 Omnichannel Integrations (Shipped: 2026-07-20)
 
 **Phases completed:** 3 phases, 3 plans, 11 tasks

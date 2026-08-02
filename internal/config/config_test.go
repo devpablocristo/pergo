@@ -34,20 +34,21 @@ func TestValidateProductionPolicy(t *testing.T) {
 	validKey := sha256.Sum256([]byte("production-policy-test-fixture-not-for-deployment"))
 	validKEK := base64.StdEncoding.EncodeToString(validKey[:])
 	baseEnv := map[string]string{
-		"PERGO_ENVIRONMENT":          "production",
-		"PERGO_RUNTIME_PROFILE":      "api",
-		"PERGO_RUN_MIGRATIONS":       "false",
-		"PERGO_DATABASE_URL":         "postgres://pergo:secret@db.internal:5432/pergo?sslmode=verify-full&sslrootcert=/var/run/secrets/postgres-ca.pem",
-		"PERGO_EXTERNAL_URL":         "https://pergo.example.test",
-		"PERGO_KEK_BASE64":           validKEK,
-		"PERGO_SESSION_SECRET":       "production-session-secret-fixture-32-plus",
-		"PERGO_META_GRAPH_VERSION":   "v25.0",
-		"PERGO_NATS_URLS":            "tls://nats-a.internal:4222,tls://nats-b.internal:4222",
-		"PERGO_NATS_CREDS_FILE":      "/var/run/secrets/nats.creds",
-		"PERGO_NATS_ACCOUNT":         "pymes-prd",
-		"PERGO_NATS_STREAM_REPLICAS": "3",
-		"PERGO_MEDIA_MODE":           "disabled",
-		"PERGO_ADMIN_PASSWORD":       "not-the-development-password",
+		"PERGO_ENVIRONMENT":           "production",
+		"PERGO_RUNTIME_PROFILE":       "api",
+		"PERGO_RUN_MIGRATIONS":        "false",
+		"PERGO_WHATSAPP_MOCK_ENABLED": "false",
+		"PERGO_DATABASE_URL":          "postgres://pergo:secret@db.internal:5432/pergo?sslmode=verify-full&sslrootcert=/var/run/secrets/postgres-ca.pem",
+		"PERGO_EXTERNAL_URL":          "https://pergo.example.test",
+		"PERGO_KEK_BASE64":            validKEK,
+		"PERGO_SESSION_SECRET":        "production-session-secret-fixture-32-plus",
+		"PERGO_META_GRAPH_VERSION":    "v25.0",
+		"PERGO_NATS_URLS":             "tls://nats-a.internal:4222,tls://nats-b.internal:4222",
+		"PERGO_NATS_CREDS_FILE":       "/var/run/secrets/nats.creds",
+		"PERGO_NATS_ACCOUNT":          "pymes-prd",
+		"PERGO_NATS_STREAM_REPLICAS":  "3",
+		"PERGO_MEDIA_MODE":            "disabled",
+		"PERGO_ADMIN_PASSWORD":        "not-the-development-password",
 	}
 
 	tests := []struct {
@@ -159,6 +160,7 @@ func TestValidateRejectsUnsafeDeploymentKEKs(t *testing.T) {
 			t.Setenv("PERGO_ENVIRONMENT", "staging")
 			t.Setenv("PERGO_RUNTIME_PROFILE", "api")
 			t.Setenv("PERGO_RUN_MIGRATIONS", "false")
+			t.Setenv("PERGO_WHATSAPP_MOCK_ENABLED", "false")
 			t.Setenv("PERGO_DATABASE_URL", "postgres://pergo:secret@db.internal:5432/pergo?sslmode=verify-full&sslrootcert=/var/run/secrets/postgres-ca.pem")
 			t.Setenv("PERGO_EXTERNAL_URL", "https://pergo.example.test")
 			t.Setenv("PERGO_KEK_BASE64", base64.StdEncoding.EncodeToString(tt.key))

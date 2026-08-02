@@ -22,4 +22,3 @@ verified: 2026-08-02
 No se verificó un rollout real porque las credenciales humanas/proveedor todavía
 no existen y la tarea prohíbe mutar GCP. Esa ausencia no es un hueco del código:
 es un preflight deliberado y probado.
-

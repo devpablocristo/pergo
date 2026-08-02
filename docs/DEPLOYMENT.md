@@ -230,6 +230,13 @@ Worker Pool e `migrate`/rotação são jobs. PostgreSQL e NATS são dependência
 externas protegidas; o Compose monolítico não é um target de homologação ou
 produção.
 
+A topologia concreta de Pymes, seus scripts `plan/audit/apply`, IAM mínimo,
+preflight PostgreSQL, Secret Manager com CMEK e credenciais NATS por perfil
+estão no
+[runbook PerGo para Pymes em Cloud Run](runbooks/pymes-gcp-cloud-run.md).
+Esse fluxo exige imagem por digest e não provisiona nem inventa uma conta
+Synadia/NATS.
+
 ---
 
 ## Pipeline de Build (Build Pipeline)

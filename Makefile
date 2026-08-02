@@ -14,7 +14,7 @@
 #    make lint       → golangci-lint
 # ─────────────────────────────────────────────────────────────
 
-.PHONY: dev up down prod prod-logs prod-down infra infra-down build generate test test-race lint clean help
+.PHONY: dev up down prod prod-logs prod-down infra infra-down build generate test test-race lint deploy-gcp-test clean help
 
 # Carrega variáveis do .env se ele existir (sem expor no shell pai)
 ifneq (,$(wildcard .env))
@@ -110,6 +110,10 @@ test-race:
 ## lint: análise estática com golangci-lint
 lint:
 	@golangci-lint run
+
+## deploy-gcp-test: valida plan/audit/apply de GCP usando somente fakes locais
+deploy-gcp-test:
+	@bash scripts/deploy/pergo-gcp-test.sh
 
 ## clean: remove binários e arquivos temporários
 clean:

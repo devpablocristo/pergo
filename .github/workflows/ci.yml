@@ -61,6 +61,9 @@ jobs:
       - name: Build runtime profiles
         run: go build ./cmd/pergo
 
+      - name: Validate fail-closed GCP deployment automation
+        run: make deploy-gcp-test
+
       - name: Validate production container policy
         run: |
           grep -Fx '.env' .dockerignore

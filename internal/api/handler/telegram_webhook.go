@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"io"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -16,10 +16,10 @@ import (
 
 // TelegramWebhookHandler handles inbound webhooks from Telegram.
 type TelegramWebhookHandler struct {
-	connectionsRepo     *repository.ConnectionRepository
-	inboundProcessor    *inbound.InboundProcessor
-	adapter             channel.InboundAdapter
-	telegramBaseURL     string
+	connectionsRepo  *repository.ConnectionRepository
+	inboundProcessor *inbound.InboundProcessor
+	adapter          channel.InboundAdapter
+	telegramBaseURL  string
 }
 
 // NewTelegramWebhookHandler creates a new TelegramWebhookHandler.
@@ -29,9 +29,9 @@ func NewTelegramWebhookHandler(
 	mediaEngine media.Engine,
 ) *TelegramWebhookHandler {
 	return &TelegramWebhookHandler{
-		connectionsRepo:     connectionsRepo,
-		inboundProcessor:    inboundProcessor,
-		adapter:             telegram.NewTelegramInboundAdapter(mediaEngine),
+		connectionsRepo:  connectionsRepo,
+		inboundProcessor: inboundProcessor,
+		adapter:          telegram.NewTelegramInboundAdapter(mediaEngine),
 	}
 }
 
@@ -61,6 +61,14 @@ func (h *TelegramWebhookHandler) Handle(c *echo.Context) error {
 		return c.NoContent(http.StatusForbidden)
 	}
 
+	body, err := readIntegrationWebhookBody(c.Request())
+	if errors.Is(err, errIntegrationWebhookBodyTooLarge) {
+		return c.NoContent(http.StatusRequestEntityTooLarge)
+	}
+	if err != nil {
+		return c.NoContent(http.StatusBadRequest)
+	}
+
 	// Load registered connections for the workspace
 	conns, err := h.connectionsRepo.ListByWorkspace(c.Request().Context(), workspaceID)
 	if err != nil {
@@ -69,22 +77,19 @@ func (h *TelegramWebhookHandler) Handle(c *echo.Context) error {
 
 	var matchingConn *repository.Connection
 	for _, conn := range conns {
-		if conn.Channel != "telegram" {
+		if conn.Channel != "telegram" || !telegram.CredentialsMatchWebhookSecret(conn.Credentials, receivedToken) {
 			continue
 		}
+		if matchingConn != nil {
+			slog.Error("tg webhook: duplicate secret token configuration", "workspace_id", workspaceID)
+			return c.NoContent(http.StatusForbidden)
+		}
 		matchingConn = conn
-		break
 	}
 
 	if matchingConn == nil {
 		slog.Warn("tg webhook: no matching connection found for workspace", "workspace_id", workspaceID)
 		return c.NoContent(http.StatusForbidden)
-	}
-
-	// Read raw request body
-	body, err := io.ReadAll(c.Request().Body)
-	if err != nil {
-		return c.NoContent(http.StatusBadRequest)
 	}
 
 	headers := map[string]string{
@@ -99,6 +104,10 @@ func (h *TelegramWebhookHandler) Handle(c *echo.Context) error {
 
 	events, err := h.adapter.Parse(c.Request().Context(), body, headers, matchingConn)
 	if err != nil {
+		if errors.Is(err, telegram.ErrTelegramMediaRetryable) {
+			c.Response().Header().Set("Retry-After", "300")
+			return c.NoContent(http.StatusServiceUnavailable)
+		}
 		slog.Warn("tg webhook: adapter failed to parse", "error", err)
 		return c.NoContent(http.StatusForbidden)
 	}

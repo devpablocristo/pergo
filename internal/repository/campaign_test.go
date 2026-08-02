@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -74,18 +76,7 @@ func TestCampaignRepository(t *testing.T) {
 		t.Errorf("expected Name %s, got %s", c.Name, fetched.Name)
 	}
 
-	// 3. UpdateStatus
-	err = repo.UpdateStatus(ctx, created.ID, domain.CampaignStatusSending)
-	if err != nil {
-		t.Fatalf("failed to update status: %v", err)
-	}
-
-	fetched, _ = repo.GetByID(ctx, created.ID)
-	if fetched.Status != domain.CampaignStatusSending {
-		t.Errorf("expected status 'sending', got %s", fetched.Status)
-	}
-
-	// 4. UpdateRecipients
+	// 3. UpdateRecipients while the campaign snapshot is still a draft.
 	newRecipients := []domain.CampaignRecipient{
 		{To: "5511999996666", Variables: map[string]string{"nome": "José"}},
 	}
@@ -99,6 +90,33 @@ func TestCampaignRepository(t *testing.T) {
 		t.Errorf("expected 1 recipient 5511999996666, got %v", fetched.Recipients)
 	}
 
+	// 4. Starting durably freezes the recipient snapshot.
+	startBatch := CampaignBatch{
+		BatchIndex:   1,
+		TotalBatches: 1,
+		TraceID:      fmt.Sprintf("campaign_%s_batch_1", created.ID),
+		Payload:      []byte(`{"batch":1}`),
+		DelaySeconds: created.DelaySeconds,
+	}
+	if _, err := repo.PrepareCampaignStart(
+		ctx,
+		created.ID,
+		ws.ID,
+		fetched.UpdatedAt,
+		[]CampaignBatch{startBatch},
+	); err != nil {
+		t.Fatalf("failed to start campaign: %v", err)
+	}
+
+	fetched, _ = repo.GetByID(ctx, created.ID)
+	if fetched.Status != domain.CampaignStatusSending {
+		t.Errorf("expected status 'sending', got %s", fetched.Status)
+	}
+	err = repo.UpdateRecipients(ctx, created.ID, []domain.CampaignRecipient{{To: "5511999995555"}}, nil)
+	if !errors.Is(err, ErrCampaignInvalidState) {
+		t.Fatalf("expected frozen recipient update to fail, got %v", err)
+	}
+
 	// 5. ListByWorkspace
 	list, err := repo.ListByWorkspace(ctx, ws.ID)
 	if err != nil {
@@ -108,8 +126,16 @@ func TestCampaignRepository(t *testing.T) {
 		t.Errorf("expected 1 campaign, got %d", len(list))
 	}
 
-	// 6. Delete
-	err = repo.Delete(ctx, created.ID)
+	// 6. Active campaigns cannot be deleted while durable outbound work may
+	// still exist. Cancel first, then delete the terminal campaign.
+	err = repo.Delete(ctx, created.ID, ws.ID)
+	if !errors.Is(err, ErrCampaignInvalidState) {
+		t.Fatalf("active campaign delete error = %v, want ErrCampaignInvalidState", err)
+	}
+	if err := repo.CancelForWorkspace(ctx, created.ID, ws.ID); err != nil {
+		t.Fatalf("failed to cancel campaign before delete: %v", err)
+	}
+	err = repo.Delete(ctx, created.ID, ws.ID)
 	if err != nil {
 		t.Fatalf("failed to delete campaign: %v", err)
 	}

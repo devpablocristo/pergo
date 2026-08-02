@@ -1,8 +1,10 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -66,6 +68,31 @@ func TestWebhookDLQRepository(t *testing.T) {
 	err = repo.InsertDLQ(ctx, ws1.ID, sub.ID, traceID, messageID, eventType, payload, testURL, attempts, &failReason)
 	if err != nil {
 		t.Fatalf("failed to insert into DLQ: %v", err)
+	}
+	var (
+		rawPayload []byte
+		rawURL     string
+		rawReason  *string
+		ciphertext []byte
+	)
+	if err := pool.QueryRow(ctx, `
+		SELECT payload, webhook_url, failure_reason, encrypted_data
+		FROM webhook_dlqs
+		WHERE workspace_id = $1
+	`, ws1.ID).Scan(&rawPayload, &rawURL, &rawReason, &ciphertext); err != nil {
+		t.Fatalf("read raw DLQ row: %v", err)
+	}
+	if bytes.Contains(rawPayload, []byte("timeout")) ||
+		bytes.Contains([]byte(rawURL), []byte("example.com")) ||
+		(rawReason != nil && bytes.Contains([]byte(*rawReason), []byte("Gateway"))) ||
+		len(ciphertext) == 0 {
+		t.Fatalf(
+			"DLQ plaintext at rest payload=%q url=%q reason=%v ciphertext=%d",
+			rawPayload,
+			rawURL,
+			rawReason,
+			len(ciphertext),
+		)
 	}
 
 	// Check Badge Count
@@ -137,5 +164,77 @@ func TestWebhookDLQRepository(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected DLQ count 0 after delete, got %d", count)
+	}
+}
+
+func TestWebhookDLQBackfillEncryptsAndScrubsLegacyRows(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+
+	ctx := context.Background()
+	enc, err := crypto.NewEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	wsRepo := NewWorkspaceRepository(pool)
+	ws, err := wsRepo.Create(ctx, "dlq_backfill_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
+	subRepo := NewWebhookSubscriptionRepository(pool, enc)
+	sub, err := subRepo.Create(
+		ctx,
+		ws.ID,
+		"https://hooks.example.com/pergo",
+		[]string{"*"},
+		[]byte("0123456789abcdef0123456789abcdef"),
+	)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	reason := "legacy-secret-reason"
+	var id uuid.UUID
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO webhook_dlqs (
+			workspace_id, subscription_id, trace_id, message_id, event_type,
+			payload, webhook_url, attempts, failure_reason, last_attempt_at
+		)
+		VALUES (
+			$1, $2, 'legacy-trace', 'legacy-message', 'failed',
+			'{"secret":"legacy-marker"}', 'https://legacy.example/hook',
+			1, $3, now()
+		)
+		RETURNING id
+	`, ws.ID, sub.ID, reason).Scan(&id); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	repo := NewWebhookDLQRepository(pool, enc)
+	if err := repo.BackfillLegacyEncryption(ctx); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	item, err := repo.GetDLQByID(ctx, id)
+	if err != nil {
+		t.Fatalf("read backfilled row: %v", err)
+	}
+	if !bytes.Contains(item.Payload, []byte("legacy-marker")) ||
+		item.WebhookURL != "https://legacy.example/hook" ||
+		item.FailureReason == nil ||
+		*item.FailureReason != reason {
+		t.Fatalf("backfilled logical data changed: %+v", item)
+	}
+	var rawText string
+	if err := pool.QueryRow(ctx, `
+		SELECT payload::text || webhook_url || COALESCE(failure_reason, '')
+		FROM webhook_dlqs
+		WHERE id = $1
+	`, id).Scan(&rawText); err != nil {
+		t.Fatalf("read scrubbed row: %v", err)
+	}
+	if strings.Contains(rawText, "legacy-marker") ||
+		strings.Contains(rawText, "legacy.example") ||
+		strings.Contains(rawText, reason) {
+		t.Fatalf("legacy plaintext remains: %q", rawText)
 	}
 }

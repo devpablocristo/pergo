@@ -18,7 +18,10 @@ Você pode gerar chaves de API na console do administrador em `http://localhost:
 
 ## 1. Enviar Mensagem
 
-Envia uma mensagem (texto, mídia ou template) para um canal específico (Telegram, WhatsApp Cloud ou WhatsApp Web).
+Envia texto ou template para um dos canais habilitados no build implantado:
+Telegram, WhatsApp Cloud ou Instagram. O adaptador não oficial de WhatsApp Web
+(`whatsapp`) existe somente em development/test e não faz parte do contrato de
+deploy.
 
 * **Endpoint:** `POST /api/v1/messages`
 * **Content-Type:** `application/json`
@@ -26,13 +29,17 @@ Envia uma mensagem (texto, mídia ou template) para um canal específico (Telegr
   * `Idempotency-Key`: identidade da operação dentro do Workspace. Deve ter de
     1 a 255 caracteres, começar com letra ou número e conter somente letras,
     números, `.`, `_`, `:`, `/` ou `-`.
-  * `X-Trace-ID`: identidade estável de correlação e deduplicação (1–255 caracteres).
+  * `X-Trace-ID`: identidade estável de correlação e deduplicação dentro do
+    Workspace (1–255 caracteres).
 * **Respostas:**
   * `202 Accepted` — Mensagem recebida com sucesso e enfileirada para envio durável.
   * `400 Bad Request` — Payload inválido ou malformado.
   * `401 Unauthorized` — Chave de API inválida ou ausente.
   * `409 Conflict` — A chave de idempotência foi reutilizada com outro payload ou Trace ID.
   * `413 Payload Too Large` — O corpo HTTP excede 1 MiB.
+  * `422 Unprocessable Entity` — O processamento de mídia falhou ou excedeu o
+    limite; no build implantado isso inclui qualquer tentativa de envio de
+    mídia, pois o armazenamento está desabilitado.
   * `425 Too Early` — Outra requisição idêntica ainda detém o claim de publicação; respeite `Retry-After`.
   * `429 Too Many Requests` — A fila de mensagens do seu Workspace atingiu o limite de capacidade de retenção de backpressure (padrão: 1.000 mensagens pendentes).
 
@@ -41,7 +48,9 @@ retorna novamente `202` com o mesmo `message_id` e `queued_at`, sem uma nova
 publicação, e inclui `Idempotency-Replayed: true`. O ledger permanece no
 PostgreSQL durante toda a vida do Workspace. Se o processo cair depois de o
 JetStream aceitar a publicação, o retry reutiliza o mesmo receipt, Trace ID e
-identificador de deduplicação; o claim vencido pode ser retomado com fencing.
+identificador de deduplicação. O `Nats-Msg-Id` físico é
+`<workspace_id>:<trace_id>`, portanto Trace IDs iguais em Workspaces distintos
+não colidem; o claim vencido pode ser retomado com fencing.
 O `message_id` é o receipt público estável e também identifica os
 eventos de entrega `queued`, `sent`, `delivered`, `read` e `failed`.
 `sending`, `failed_transient` e `uncertain` são estados internos e nunca nomes
@@ -57,41 +66,35 @@ provedor não fazem parte do contrato e não são persistidos nem publicados.
 ```json
 {
   "to": "5511999999999",
-  "channel": "whatsapp",
+  "channel": "whatsapp_cloud",
   "body": "Olá! Esta é uma mensagem de teste enviada pelo PerGo."
 }
 ```
 
 * **Campos:**
-  * `to` (string, obrigatório): Destinatário. Para WhatsApp, utilize o formato completo com DDI e DDD (ex: `5511999999999`). Para Telegram, o ID numérico do chat (`chat_id`).
-  * `channel` (string, obrigatório): Canal de disparo. Valores válidos: `"whatsapp"` (WhatsApp Web/whatsmeow), `"whatsapp_cloud"` (WABA oficial) ou `"telegram"`.
-  * `body` (string, obrigatório): Texto da mensagem.
+  * `to` (string, obrigatório): Destinatário no formato exigido pelo provedor.
+    Para WABA, use o número completo com DDI e DDD (ex: `5511999999999`);
+    para Telegram, o `chat_id`; para Instagram, o identificador de destinatário.
+  * `channel` (string, obrigatório): No build implantado, use
+    `"whatsapp_cloud"`, `"telegram"` ou `"instagram"`. Identificadores como
+    `"whatsapp"`, `"whatsapp_mock"` e os canais SMTP são auxiliares locais e
+    não possuem dispatcher nos perfis implantados.
+  * `body` (string): Texto da mensagem. É obrigatório para uma mensagem textual;
+    pode ficar vazio quando um template ou payload interativo válido é enviado.
 
 ---
 
-### Envio de Mídia (Imagens, Documentos e Áudios)
+### Disponibilidade de Mídia
 
-Você pode enviar mídias anexando o objeto `media` ao payload:
+O build implantado é somente texto e exige `PERGO_MEDIA_MODE=disabled`.
+Requisições outbound que incluem `media` falham antes do enqueue com HTTP 422 e
+`code: "media_download_failed"`; o detalhe interno é `media_disabled`.
+Webhooks inbound de WABA ou Telegram com anexos recebem HTTP 503 com
+`Retry-After: 300`, sem confirmar o evento antes de armazenar a mídia.
 
-```json
-{
-  "to": "5511999999999",
-  "channel": "whatsapp_cloud",
-  "body": "",
-  "media": {
-    "media_url": "https://meuservidor.com/comprovante.pdf",
-    "media_type": "document",
-    "filename": "comprovante.pdf",
-    "caption": "Segue o comprovante de pagamento."
-  }
-}
-```
-
-* **Subcampos do objeto `media`:**
-  * `media_url` (string, obrigatório): URL direta e pública do arquivo de mídia.
-  * `media_type` (string, obrigatório): Tipo de mídia. Valores aceitos: `"image"`, `"document"` ou `"audio"`.
-  * `filename` (string, obrigatório se `media_type` for `"document"`, opcional para os demais): Nome do arquivo exibido para o usuário.
-  * `caption` (string, opcional): Legenda da imagem ou documento.
+As variáveis `PERGO_S3_*` não habilitam mídia em produção. O modo `memory`
+mantém o schema de mídia exercitável apenas em development/test e não representa
+persistência S3.
 
 ---
 
@@ -132,3 +135,7 @@ Para iniciar conversas com clientes (fora da janela de 24 horas) via WhatsApp Cl
 Para escutar as mensagens recebidas de volta dos seus clientes ou atualizações de status de entrega (enviado, entregue, lido), configure seu servidor de escuta no dashboard do PerGo sob a aba **Webhooks**.
 
 O PerGo irá disparar requisições `POST` contendo os dados do evento sempre que houver novidades.
+
+No build implantado, a entrada de mensagens está disponível para WABA e
+Telegram; Instagram é somente outbound. Eventos de entrega públicos usam apenas
+`queued`, `sent`, `delivered`, `read` e `failed`.

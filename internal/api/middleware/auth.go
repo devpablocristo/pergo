@@ -2,9 +2,13 @@
 package middleware
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v5"
 
 	"github.com/pablojhp.pergo/internal/platform/crypto"
@@ -12,9 +16,14 @@ import (
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
+// APIKeyLookup is the authentication adapter's consumer-owned credential port.
+type APIKeyLookup interface {
+	FindActiveCandidates(ctx context.Context, plaintext string) ([]repository.APIKey, error)
+}
+
 // AuthMiddleware returns an Echo middleware that validates API keys from the
 // Authorization header and injects workspace_id into the request context.
-func AuthMiddleware(repo *repository.APIKeyRepository) echo.MiddlewareFunc {
+func AuthMiddleware(repo APIKeyLookup) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			path := c.Request().URL.Path
@@ -29,11 +38,6 @@ func AuthMiddleware(repo *repository.APIKeyRepository) echo.MiddlewareFunc {
 				if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
 					key = parts[1]
 				}
-			} else {
-				key = c.QueryParam("api_key")
-				if key == "" {
-					key = c.QueryParam("token")
-				}
 			}
 
 			if key == "" || len(key) < 8 {
@@ -43,17 +47,30 @@ func AuthMiddleware(repo *repository.APIKeyRepository) echo.MiddlewareFunc {
 				})
 			}
 
-			prefix := key[:8]
-			apiKey, err := repo.GetByPrefix(c.Request().Context(), prefix)
+			candidates, err := repo.FindActiveCandidates(c.Request().Context(), key)
 			if err != nil {
+				if !errors.Is(err, pgx.ErrNoRows) {
+					slog.Error("API key dependency unavailable")
+					c.Response().Header().Set("Retry-After", "1")
+					return c.JSON(http.StatusServiceUnavailable, map[string]string{
+						"code":    "authentication_unavailable",
+						"message": "authentication dependency is temporarily unavailable",
+					})
+				}
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"code":    "unauthorized",
 					"message": "invalid or missing API key",
 				})
 			}
 
-			// Verify the full key by comparing hashes
-			if !crypto.VerifyAPIKey(key, apiKey.KeyHash) {
+			var apiKey *repository.APIKey
+			for i := range candidates {
+				if crypto.VerifyAPIKey(key, candidates[i].KeyHash) {
+					apiKey = &candidates[i]
+					break
+				}
+			}
+			if apiKey == nil {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"code":    "unauthorized",
 					"message": "invalid or missing API key",

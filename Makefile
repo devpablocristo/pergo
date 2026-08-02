@@ -4,7 +4,7 @@
 #    make dev        → hot-reload (carrega .env automaticamente)
 #    make up         → build + sobe app, PostgreSQL e NATS via docker compose
 #    make down       → para todos os serviços via docker compose (preserva volumes)
-#    make prod       → alias de make up
+#    make prod       → falha fechado; produção usa workloads separados
 #    make infra      → sobe só postgres + nats (sem o app)
 #    make infra-down → derruba infra
 #    make build      → compila o binário para ./bin/pergo
@@ -40,9 +40,9 @@ watch: dev
 
 # ─── Produção ────────────────────────────────────────────────
 
-## up: build da imagem e sobe PerGo, PostgreSQL e NATS via Docker Compose
+## up: build da imagem e sobe o stack monolítico somente para desenvolvimento local
 up:
-	@echo "→ Fazendo build e subindo PerGo + PostgreSQL + NATS via Docker Compose..."
+	@echo "→ Subindo o stack local de desenvolvimento..."
 	@docker compose up --build -d
 	@echo "✓ Rodando em http://localhost:$${PERGO_HOST_PORT:-8080}"
 
@@ -55,15 +55,21 @@ down:
 		echo "✓ PerGo ya estaba detenido."; \
 	fi
 
-## prod: alias de make up
-prod: up
+## prod: bloqueado; produção exige api/webhook/worker/migrate separados
+prod:
+	@echo "✗ 'make prod' é proibido: docker-compose.yml contém somente defaults locais de desenvolvimento."
+	@echo "  Use a mesma imagem com os workloads api, webhook, worker e migrate descritos em docs/DEPLOYMENT.md."
+	@false
 
-## prod-logs: acompanha os logs do container em produção
+## prod-logs: bloqueado; consulte os logs do orquestrador de produção
 prod-logs:
-	@docker compose --env-file .env logs -f pergo
+	@echo "✗ Docker Compose não é o runtime de produção."
+	@false
 
-## prod-down: alias de make down
-prod-down: down
+## prod-down: bloqueado; use o rollout/rollback do orquestrador
+prod-down:
+	@echo "✗ Docker Compose não administra produção."
+	@false
 
 # ─── Infra local (mesmo Docker Compose) ───────────────────────
 

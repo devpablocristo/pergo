@@ -11,7 +11,8 @@ Este documento descreve as diretrizes de código, a estrutura de pastas e as mel
 * **a-h/templ** (`github.com/a-h/templ`) — Compile-time type-safe HTML componentes
 * **pgx/v5** (`github.com/jackc/pgx/v5`) — Driver PostgreSQL de alta performance
 * **nats.go** (`github.com/nats-io/nats.go`) — Broker de filas JetStream duráveis
-* **whatsmeow** (`go.mau.fi/whatsmeow`) — Conector não-oficial para WhatsApp Web
+* **whatsmeow** (`go.mau.fi/whatsmeow`) — Conector não-oficial para WhatsApp
+  Web, registrado somente em development/test
 
 ---
 
@@ -30,7 +31,7 @@ O projeto segue um layout orientado ao domínio e infraestrutura:
 │   ├── domain/           # Entidades e modelos de domínio (mensagens, workspaces, audit)
 │   ├── platform/         # Utilitários globais de infraestrutura (criptografia, banco, NATS, shutdown, migrations)
 │   ├── repository/       # Repositórios SQL (Workspace, APIKey, Connection)
-│   └── session/          # Gerenciamento de conexões de sessão (WhatsApp Web)
+│   └── session/          # Sessões WhatsApp Web exclusivas de development/test
 ├── static/               # Assets estáticos (CSS, JS do HTMX/WebSockets)
 └── templates/            # Componentes visuais (.templ) compilados para Go
 ```
@@ -99,7 +100,12 @@ Para configurar o ambiente de desenvolvimento local, siga os passos abaixo:
      ```bash
      make up
      ```
-   - O PerGo executará automaticamente as migrações SQL pendentes (via Goose) no banco de dados na primeira inicialização.
+   - Neste Compose local, `PERGO_ENV=development` e
+     `PERGO_RUN_MIGRATIONS=true` permitem que o processo aplique as migrações
+     SQL pendentes via Goose na primeira inicialização.
+   - Essa conveniência não existe nos perfis implantados: `api`, `webhook` e
+     `worker` nunca devem migrar ou bootstrapar infraestrutura. Staging e
+     produção executam primeiro o job dedicado `pergo migrate`.
    - O painel administrativo estará acessível em `http://localhost:8080/admin` usando as credenciais definidas em seu `.env` (`PERGO_ADMIN_PASSWORD`).
 
 ---
@@ -119,9 +125,11 @@ O projeto gerencia tarefas comuns de build e desenvolvimento por meio do `Makefi
   - `make down`: Para e remove os contêineres, preservando os volumes locais.
   - `make infra`: Inicia apenas PostgreSQL e NATS do mesmo Compose.
   - `make infra-down`: Para apenas PostgreSQL e NATS do mesmo Compose.
-  - `make prod`: Alias de `make up`.
-  - `make prod-logs`: Acompanha a saída de logs do aplicativo rodando em produção.
-  - `make prod-down`: Encerra e remove todos os contêineres de produção.
+  - `make prod`, `make prod-logs` e `make prod-down`: alvos deliberadamente
+    bloqueados, pois `docker-compose.yml` contém somente defaults locais.
+  - Para staging/produção, publique a mesma imagem como workloads separados
+    `migrate`, `api`, `webhook` e `worker`, seguindo o
+    [guia de implantação](DEPLOYMENT.md).
 
 ---
 

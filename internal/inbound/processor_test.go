@@ -64,10 +64,17 @@ type fakePublisher struct {
 		data    []byte
 		traceID string
 	}
-	err error
+	err        error
+	failures   int
+	attemptIDs []string
 }
 
 func (f *fakePublisher) Publish(ctx context.Context, subject string, data []byte, traceID string) error {
+	f.attemptIDs = append(f.attemptIDs, traceID)
+	if f.failures > 0 {
+		f.failures--
+		return f.err
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -257,6 +264,102 @@ func TestInboundProcessor_Process(t *testing.T) {
 		// Verify only 1 message was published
 		if len(pub.published) != 1 {
 			t.Errorf("expected 1 published event, got %d", len(pub.published))
+		}
+	})
+
+	t.Run("Same Telegram update from two connections is not cross-deduplicated", func(t *testing.T) {
+		pub := &fakePublisher{}
+		proc := inbound.NewInboundProcessor(
+			dedupRepo,
+			wsRepo,
+			&fakeMediaEngine{},
+			pub,
+			&fakeAuditWriter{},
+			sessRepo,
+			contactRepo,
+			dispatchRepo,
+			nil,
+		)
+		updateID := "telegram-update-" + uuid.NewString()
+		first := &inbound.InboundEvent{
+			WorkspaceID:  ws.ID,
+			ConnectionID: uuid.New(),
+			MessageID:    updateID,
+			Channel:      "telegram",
+			From:         "chat-a",
+			To:           "@bot_a",
+			Body:         "from bot A",
+		}
+		second := &inbound.InboundEvent{
+			WorkspaceID:  ws.ID,
+			ConnectionID: uuid.New(),
+			MessageID:    updateID,
+			Channel:      "telegram",
+			From:         "chat-b",
+			To:           "@bot_b",
+			Body:         "from bot B",
+		}
+
+		if err := proc.Process(ctx, first); err != nil {
+			t.Fatalf("process first bot: %v", err)
+		}
+		if err := proc.Process(ctx, second); err != nil {
+			t.Fatalf("process second bot: %v", err)
+		}
+		if err := proc.Process(ctx, first); err != nil {
+			t.Fatalf("replay first bot: %v", err)
+		}
+		if len(pub.published) != 2 {
+			t.Fatalf("published=%d, want both connections exactly once", len(pub.published))
+		}
+		if pub.published[0].traceID == pub.published[1].traceID {
+			t.Fatal("two Telegram connections shared one durable broker identity")
+		}
+	})
+
+	t.Run("Failed durable publish can retry with one stable broker identity", func(t *testing.T) {
+		pub := &fakePublisher{
+			err:      errors.New("broker unavailable"),
+			failures: 1,
+		}
+		proc := inbound.NewInboundProcessor(
+			dedupRepo,
+			wsRepo,
+			&fakeMediaEngine{},
+			pub,
+			&fakeAuditWriter{},
+			sessRepo,
+			contactRepo,
+			dispatchRepo,
+			nil,
+		)
+		event := &inbound.InboundEvent{
+			WorkspaceID: ws.ID,
+			MessageID:   "retry-" + uuid.NewString(),
+			Channel:     "whatsapp_cloud",
+			From:        "5491111111111",
+			To:          "waba-number",
+			Body:        "retry me",
+		}
+
+		if err := proc.Process(ctx, event); err == nil {
+			t.Fatal("first publish unexpectedly succeeded")
+		}
+		pub.err = nil
+		if err := proc.Process(ctx, event); err != nil {
+			t.Fatalf("retry publish: %v", err)
+		}
+		if err := proc.Process(ctx, event); err != nil {
+			t.Fatalf("published replay: %v", err)
+		}
+		if len(pub.attemptIDs) != 2 {
+			t.Fatalf("publisher attempts=%d, want 2", len(pub.attemptIDs))
+		}
+		if pub.attemptIDs[0] == "" || pub.attemptIDs[0] != pub.attemptIDs[1] {
+			t.Fatalf("publish identities changed across retry: %v", pub.attemptIDs)
+		}
+		if len(pub.published) != 1 {
+			t.Fatalf("published=%d, want exactly 1 accepted event", len(pub.published))
 		}
 	})
 
@@ -533,33 +636,13 @@ func TestProcess_StatusUpdate(t *testing.T) {
 		t.Errorf("expected contact resolution to be bypassed, but contact was created (count = %d)", count)
 	}
 
-	// 3. Verify the internal status event and canonical webhook delivery event.
-	if len(pub.published) != 2 {
-		t.Fatalf("expected 2 NATS publishes, got %d", len(pub.published))
+	// 3. Verify the canonical webhook delivery event. Status events do not share
+	// the outbound WorkQueue because heterogeneous payloads could be consumed as
+	// outbound messages and silently discarded.
+	if len(pub.published) != 1 {
+		t.Fatalf("expected 1 NATS publish, got %d", len(pub.published))
 	}
-	pubEvent := pub.published[0]
-	if pubEvent.subject != "messages.status_updated" {
-		t.Errorf("expected subject 'messages.status_updated', got %q", pubEvent.subject)
-	}
-
-	var payload inbound.MessageStatusUpdatedPayload
-	if err := json.Unmarshal(pubEvent.data, &payload); err != nil {
-		t.Fatalf("failed to unmarshal NATS payload: %v", err)
-	}
-	if payload.WorkspaceID != ws.ID.String() {
-		t.Errorf("expected workspace ID %s, got %s", ws.ID.String(), payload.WorkspaceID)
-	}
-	if payload.DispatchID != d.ID.String() {
-		t.Errorf("expected dispatch ID %s, got %s", d.ID.String(), payload.DispatchID)
-	}
-	if payload.MessageID != providerID {
-		t.Errorf("expected message ID %s, got %s", providerID, payload.MessageID)
-	}
-	if payload.Status != "delivered" {
-		t.Errorf("expected status 'delivered', got %s", payload.Status)
-	}
-
-	deliveryEvent := pub.published[1]
+	deliveryEvent := pub.published[0]
 	if deliveryEvent.subject != "webhooks.events" {
 		t.Fatalf("expected subject webhooks.events, got %q", deliveryEvent.subject)
 	}
@@ -581,17 +664,56 @@ func TestProcess_StatusUpdate(t *testing.T) {
 	if err := proc.Process(ctx, event); err != nil {
 		t.Fatalf("Process read failed: %v", err)
 	}
-	if len(pub.published) != 4 {
-		t.Fatalf("expected 4 total NATS publishes, got %d", len(pub.published))
+	if len(pub.published) != 2 {
+		t.Fatalf("expected 2 total NATS publishes, got %d", len(pub.published))
 	}
 	var readDelivery inbound.DeliveryEventPayload
-	if err := json.Unmarshal(pub.published[3].data, &readDelivery); err != nil {
+	if err := json.Unmarshal(pub.published[1].data, &readDelivery); err != nil {
 		t.Fatalf("failed to unmarshal read delivery payload: %v", err)
 	}
-	if pub.published[3].subject != "webhooks.events" ||
+	if pub.published[1].subject != "webhooks.events" ||
 		readDelivery.Event != "read" ||
 		readDelivery.MessageID != receiptID.String() {
-		t.Fatalf("unexpected read event subject=%q payload=%+v", pub.published[3].subject, readDelivery)
+		t.Fatalf("unexpected read event subject=%q payload=%+v", pub.published[1].subject, readDelivery)
+	}
+}
+
+func TestProcessStatusUpdateRetriesWhenDispatchIsNotPersistedYet(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+
+	ctx := context.Background()
+	wsRepo := repository.NewWorkspaceRepository(pool)
+	ws, err := wsRepo.Create(ctx, "status_before_dispatch_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, ws.ID) }()
+
+	publisher := &fakePublisher{}
+	proc := inbound.NewInboundProcessor(
+		repository.NewInboundDedupRepository(pool),
+		wsRepo,
+		&fakeMediaEngine{},
+		publisher,
+		&fakeAuditWriter{},
+		repository.NewRecipientSessionRepository(pool),
+		repository.NewContactRepository(pool),
+		repository.NewMessageDispatchRepository(pool),
+		nil,
+	)
+	err = proc.Process(ctx, &inbound.InboundEvent{
+		WorkspaceID: ws.ID,
+		MessageID:   "wamid.arrived-before-send-commit",
+		Channel:     "whatsapp_cloud",
+		Body:        "delivered",
+		Metadata:    map[string]string{"type": "status_update"},
+	})
+	if !errors.Is(err, repository.ErrDispatchNotFound) {
+		t.Fatalf("error=%v, want retryable ErrDispatchNotFound", err)
+	}
+	if len(publisher.published) != 0 {
+		t.Fatalf("published %d events for unmatched receipt", len(publisher.published))
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +40,7 @@ import (
 	"github.com/pablojhp.pergo/internal/platform/audit"
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 	echosrv "github.com/pablojhp.pergo/internal/platform/echo"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/platform/obs"
 	"github.com/pablojhp.pergo/internal/platform/postgres"
 	"github.com/pablojhp.pergo/internal/platform/postgres/tenant"
@@ -53,9 +55,26 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "rotate-waba-webhook-secrets" {
+		slog.SetDefault(obs.NewJSONLogger(os.Stderr))
+		if err := runWABACredentialRotation(context.Background()); err != nil {
+			slog.Error("WABA credential rotation failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("WABA webhook credentials rotated successfully",
+			"workspace_id", os.Getenv("PERGO_ROTATE_WORKSPACE_ID"),
+			"connection_id", os.Getenv("PERGO_ROTATE_CONNECTION_ID"),
+		)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
 		slog.SetDefault(obs.NewJSONLogger(os.Stderr))
 		cfg := config.Load()
+		cfg.RuntimeProfile = config.RuntimeWorker
+		if err := cfg.Validate(); err != nil {
+			slog.Error("invalid configuration", "error", err)
+			os.Exit(1)
+		}
 		ctx := context.Background()
 
 		pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
@@ -65,23 +84,27 @@ func main() {
 		}
 		defer pool.Close()
 
-		kek := cfg.KEKBytes
-		if len(kek) != 32 {
-			kek = make([]byte, 32)
-			copy(kek, []byte("dev-development-key-32-bytes-kek"))
-		}
+		kek := resolvedKEK(cfg)
 		encryptor, err := crypto.NewEncryptor(kek)
 		if err != nil {
 			slog.Error("failed to initialize encryptor", "error", err)
 			os.Exit(1)
 		}
 
-		nc, err := nats.Connect(cfg.NATSUrl)
+		nc, err := connectConfiguredNATS(cfg)
 		if err != nil {
 			slog.Error("failed to connect to NATS", "error", err)
 			os.Exit(1)
 		}
 		defer nc.Close()
+		accountLabel := cfg.NATSAccount
+		if accountLabel == "" {
+			accountLabel = "local"
+		}
+		if err := queue.VerifyEnvironmentIsolation(ctx, nc, cfg.Environment, accountLabel, cfg.NATSStreamReplicas); err != nil {
+			slog.Error("NATS account isolation check failed", "error", err)
+			os.Exit(1)
+		}
 		publisher := queue.NewJetStreamPublisher(nc)
 
 		wsRepo := repository.NewWorkspaceRepository(pool)
@@ -105,64 +128,47 @@ func main() {
 
 	// --- Config from env vars ---
 	cfg := config.Load()
+	if err := applyRuntimeProfileArgument(cfg, os.Args[1:]); err != nil {
+		slog.Error("invalid command", "error", err)
+		os.Exit(2)
+	}
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	runsWorkers := profileRunsWorkers(cfg.RuntimeProfile)
 
 	// --- PostgreSQL ---
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	managedShutdown := false
 
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("failed to create pgxpool", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
+	defer func() {
+		if !managedShutdown {
+			pool.Close()
+		}
+	}()
 
 	db, err := postgres.NewSQLDB(pool)
 	if err != nil {
 		slog.Error("failed to create stdlib sql.DB", "error", err)
 		os.Exit(1)
 	}
-	defer func() { _ = db.Close() }()
-
-	if err := postgres.RunMigrations(db); err != nil {
-		slog.Error("migrations failed", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("migrations applied successfully")
-
-	// --- NATS ---
-	nc, err := nats.Connect(cfg.NATSUrl)
-	if err != nil {
-		slog.Error("failed to connect to NATS", "error", err)
-		os.Exit(1)
-	}
-	defer nc.Close()
-	slog.Info("connected to NATS")
-
-	// --- JetStream ---
-	stream, err := queue.EnsureStream(ctx, nc)
-	if err != nil {
-		slog.Error("failed to create JetStream stream", "error", err)
-		os.Exit(1)
-	}
-	publisher := queue.NewJetStreamPublisher(nc)
-
-	// --- Worker (reads from JetStream, logs dispatched messages) ---
-	consumer, err := queue.EnsureConsumer(ctx, stream, "worker-1")
-	if err != nil {
-		slog.Error("failed to create JetStream consumer", "error", err)
-		os.Exit(1)
-	}
-	// --- Rate limiter (per-workspace token bucket) ---
-	rateLimiter := middleware.NewRateLimiter(10, 10) // 10 req/s, burst 10
-	queueDepth := middleware.NewQueueDepthTracker()
+	defer func() {
+		if !managedShutdown {
+			_ = db.Close()
+		}
+	}()
 
 	// --- Cryptography Encryptor & Credentials Repository ---
-	kek := cfg.KEKBytes
-	if len(kek) != 32 {
+	kek := resolvedKEK(cfg)
+	if len(cfg.KEKBytes) != 32 {
 		slog.Warn("PERGO_KEK_BASE64 is not set or not 32 bytes; using a default development key. DO NOT USE IN PRODUCTION.")
-		kek = make([]byte, 32)
-		copy(kek, []byte("dev-development-key-32-bytes-kek"))
 	}
 	encryptor, err := crypto.NewEncryptor(kek)
 	if err != nil {
@@ -170,21 +176,132 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --- S3 Storage Client ---
-	s3Client, err := storage.NewS3Client(
-		cfg.S3Endpoint,
-		cfg.S3Region,
-		cfg.S3AccessKey,
-		cfg.S3SecretKey,
-		cfg.S3Bucket,
-		cfg.S3UsePathStyle,
-	)
+	if cfg.RuntimeProfile == config.RuntimeMigrate {
+		if err := postgres.RunMigrations(db); err != nil {
+			slog.Error("migrations failed", "error", err)
+			os.Exit(1)
+		}
+		dlqRepo := repository.NewWebhookDLQRepository(pool, encryptor)
+		if err := dlqRepo.BackfillLegacyEncryption(ctx); err != nil {
+			slog.Error("webhook DLQ encryption backfill failed", "error", err)
+			os.Exit(1)
+		}
+		nc, err := connectConfiguredNATS(cfg)
+		if err != nil {
+			slog.Error("failed to connect to NATS for bootstrap", "error", err)
+			os.Exit(1)
+		}
+		defer nc.Close()
+		accountLabel := cfg.NATSAccount
+		if accountLabel == "" {
+			accountLabel = "local"
+		}
+		if cfg.NATSAdoptDrainedLegacy {
+			if err := queue.AdoptDrainedLegacyEnvironmentIsolation(
+				ctx,
+				nc,
+				cfg.Environment,
+				accountLabel,
+				cfg.NATSStreamReplicas,
+			); err != nil {
+				slog.Error("legacy NATS adoption gate failed", "error", err)
+				os.Exit(1)
+			}
+		}
+		if err := queue.BootstrapJetStream(
+			ctx,
+			nc,
+			cfg.Environment,
+			accountLabel,
+			cfg.NATSStreamReplicas,
+		); err != nil {
+			slog.Error("NATS bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("database migrations, encrypted backfill, and NATS bootstrap completed")
+		return
+	}
+	if cfg.RunMigrations {
+		if err := postgres.RunMigrations(db); err != nil {
+			slog.Error("migrations failed", "error", err)
+			os.Exit(1)
+		}
+		dlqRepo := repository.NewWebhookDLQRepository(pool, encryptor)
+		if err := dlqRepo.BackfillLegacyEncryption(ctx); err != nil {
+			slog.Error("development webhook DLQ encryption backfill failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("development migrations and encrypted backfill applied successfully")
+	}
+
+	// --- NATS ---
+	nc, err := connectConfiguredNATS(cfg)
 	if err != nil {
-		slog.Error("failed to initialize S3 client", "error", err)
+		slog.Error("failed to connect to NATS", "error", err)
 		os.Exit(1)
+	}
+	defer func() {
+		if !managedShutdown {
+			nc.Close()
+		}
+	}()
+	slog.Info("connected to NATS", "profile", cfg.RuntimeProfile, "environment", cfg.Environment)
+	accountLabel := cfg.NATSAccount
+	if accountLabel == "" {
+		accountLabel = "local"
+	}
+	if cfg.IsDevelopment() {
+		if err := queue.BootstrapJetStream(
+			ctx,
+			nc,
+			cfg.Environment,
+			accountLabel,
+			cfg.NATSStreamReplicas,
+		); err != nil {
+			slog.Error("development NATS bootstrap failed", "error", err)
+			os.Exit(1)
+		}
+	} else if err := queue.VerifyEnvironmentIsolation(
+		ctx,
+		nc,
+		cfg.Environment,
+		accountLabel,
+		cfg.NATSStreamReplicas,
+	); err != nil {
+		slog.Error("NATS account isolation check failed", "error", err)
+		os.Exit(1)
+	}
+	publisher := queue.NewJetStreamPublisher(nc)
+
+	// --- Rate limiter (per-workspace token bucket) ---
+	rateLimiter := middleware.NewRateLimiter(10, 10) // 10 req/s, burst 10
+	loginRateLimiter := middleware.NewIPRateLimiter(0.2, 5)
+	// Queue admission is enforced durably by JetStream per workspace subject.
+	// A process-local counter is incorrect for split API/worker replicas.
+	var queueDepth *middleware.QueueDepthTracker
+
+	// --- Media storage (explicitly disabled outside local/test in this build) ---
+	s3Client := storage.NewDisabledS3Client()
+	if cfg.MediaMode == config.MediaMemory {
+		s3Client, err = storage.NewS3Client(
+			cfg.S3Endpoint,
+			cfg.S3Region,
+			cfg.S3AccessKey,
+			cfg.S3SecretKey,
+			cfg.S3Bucket,
+			cfg.S3UsePathStyle,
+		)
+		if err != nil {
+			slog.Error("failed to initialize development media storage", "error", err)
+			os.Exit(1)
+		}
+		slog.Warn("in-memory media storage enabled; do not use this mode outside development/test")
+	} else {
+		slog.Info("media storage disabled; media operations fail closed")
 	}
 
 	mediaEngine := media.NewDefaultEngine(s3Client)
+	metaGraphBaseURL := metaapi.BaseURL(cfg.MetaGraphVersion)
 
 	connectionRepo := repository.NewConnectionRepository(pool, encryptor)
 	recipientSessionRepo := repository.NewRecipientSessionRepository(pool)
@@ -194,28 +311,35 @@ func main() {
 
 	// --- REST Adapters ---
 	wabaAdapter := whatsapp.NewWABAAdapter(connectionRepo, nil, windowChecker, cfg.ExternalURL)
+	wabaAdapter.SetBaseURL(metaGraphBaseURL)
 	telegramAdapter := telegram.NewTelegramAdapter(connectionRepo, nil, s3Client)
-	whatsAppAdapter := whatsapp.NewWhatsAppAdapter(nil, s3Client)
 	instagramAdapter := instagram.NewAdapter(connectionRepo, nil, cfg.ExternalURL)
-	emailProvider := email.NewSMTPProvider(email.SMTPConfig{
-		Host:        "localhost",
-		Port:        1025,
-		FromAddress: "noreply@pergo.dev",
-		FromName:    "PerGo Platform",
-	})
-	emailAdapter := email.NewEmailAdapter(emailProvider)
+	instagramAdapter.SetBaseURL(metaGraphBaseURL)
 
 	// --- Worker (reads from JetStream, dispatches with retry/TTL/dedup) ---
 	sessionRegistry := session.NewActiveSession()
-	whatsAppAdapter.SetSessionFinder(sessionRegistry)
 
 	dispatcherRegistry := channel.NewRegistry(nil) // populated by session manager
 	dispatcherRegistry.Register("whatsapp_cloud", wabaAdapter)
 	dispatcherRegistry.Register("telegram", telegramAdapter)
-	dispatcherRegistry.Register("whatsapp", whatsAppAdapter)
 	dispatcherRegistry.Register("instagram", instagramAdapter)
-	dispatcherRegistry.Register("email", emailAdapter)
-	dispatcherRegistry.Register("email_smtp", emailAdapter)
+	if cfg.IsDevelopment() {
+		whatsAppAdapter := whatsapp.NewWhatsAppAdapter(nil, s3Client)
+		whatsAppAdapter.SetSessionFinder(sessionRegistry)
+		dispatcherRegistry.Register("whatsapp", whatsAppAdapter)
+
+		emailProvider := email.NewSMTPProvider(email.SMTPConfig{
+			Host:        "localhost",
+			Port:        1025,
+			FromAddress: "noreply@pergo.dev",
+			FromName:    "PerGo Platform",
+		})
+		emailAdapter := email.NewEmailAdapter(emailProvider)
+		dispatcherRegistry.Register("email", emailAdapter)
+		dispatcherRegistry.Register("email_smtp", emailAdapter)
+	} else {
+		slog.Info("unsupported WhatsApp Web and development SMTP channels disabled")
+	}
 	if cfg.WhatsAppMockEnabled {
 		dispatcherRegistry.Register("whatsapp_mock", whatsappmock.NewAdapter())
 		slog.Warn("local WhatsApp mock dispatcher is enabled; simulated sends never contact WhatsApp or Meta")
@@ -232,48 +356,105 @@ func main() {
 
 	integrationRepo := repository.NewIntegrationRepository(pool, encryptor)
 	chatwootMappingRepo := repository.NewChatwootMappingRepository(pool)
-	chatwootSyncer := chatwoot.NewChatwootSyncer(integrationRepo, chatwootMappingRepo, nil)
-
-	typebotSessionRepo := repository.NewTypebotSessionRepository(pool)
-	typebotForwarder := typebot.NewForwarder(typebotSessionRepo, integrationRepo, publisher)
-	inboundRouter := inbound.NewDefaultRouter(chatwootSyncer, typebotForwarder)
+	var inboundRouter inbound.InboundRouter
+	if cfg.IsDevelopment() {
+		chatwootSyncer := chatwoot.NewChatwootSyncer(integrationRepo, chatwootMappingRepo, nil)
+		typebotSessionRepo := repository.NewTypebotSessionRepository(pool)
+		typebotForwarder := typebot.NewForwarder(typebotSessionRepo, integrationRepo, publisher)
+		inboundRouter = inbound.NewDefaultRouter(chatwootSyncer, typebotForwarder)
+	} else {
+		slog.Info("Chatwoot and Typebot routing disabled outside development/test")
+	}
 
 	inboundProcessor := inbound.NewInboundProcessor(dedupRepo, wsRepo, mediaEngine, publisher, auditWriter, recipientSessionRepo, contactRepo, dispatchRepo, inboundRouter)
 	sessionManager := session.NewManager(db, connectionRepo, sessionRegistry, dispatcherRegistry, "2.3000.1025000000", inboundProcessor)
 	orchestrator := queue.NewDispatchOrchestrator(dispatcherRegistry, dispatchRepo, publisher, queueDepth, auditWriter, contactRepo, 5, 60*time.Second)
 	orchestrator.SetContactRepository(contactRepo)
-	worker := queue.NewWorker(ctx, consumer, orchestrator)
-	slog.Info("message worker started", "consumer", "worker-1")
-
-	// --- Campaign Worker ---
-	campStream, err := queue.EnsureCampaignStream(ctx, nc)
-	if err != nil {
-		slog.Error("failed to create JetStream campaign stream", "error", err)
-		os.Exit(1)
-	}
-	campConsumer, err := queue.EnsureCampaignConsumer(ctx, campStream, "campaign-worker-1")
-	if err != nil {
-		slog.Error("failed to create JetStream campaign consumer", "error", err)
-		os.Exit(1)
-	}
 	campaignRepo := repository.NewCampaignRepository(pool)
-	campaignWorker := queue.NewCampaignWorker(ctx, campConsumer, campaignRepo, connectionRepo, dispatchRepo, publisher)
-	slog.Info("campaign worker started", "consumer", "campaign-worker-1")
-
-	// --- Webhook Worker ---
 	webhookSubRepo := repository.NewWebhookSubscriptionRepository(pool, encryptor)
+	if !cfg.IsDevelopment() {
+		if err := webhookSubRepo.RequireSecureActive(ctx); err != nil {
+			slog.Error("webhook subscription security gate failed", "error", err)
+			os.Exit(1)
+		}
+	}
 	webhookDLQRepo := repository.NewWebhookDLQRepository(pool, encryptor)
-	verbsEngine := webhook.NewVerbsEngine(publisher, contactRepo, userActionLogRepo, connectionRepo)
-	webhookDispatcher := webhook.NewDefaultDispatcher(webhookSubRepo, webhookDLQRepo, wsRepo, nil, verbsEngine)
-	webhookWorker, err := queue.NewWebhookWorker(ctx, nc, webhookDispatcher, webhookSubRepo)
-	if err != nil {
-		slog.Error("failed to start webhook worker", "error", err)
+	if err := webhookDLQRepo.RequireEncrypted(ctx); err != nil {
+		slog.Error("webhook DLQ encryption gate failed", "error", err)
 		os.Exit(1)
 	}
-	webhookWorker.SetWorkspaceRepository(wsRepo)
+
+	var worker *queue.Worker
+	var campaignWorker *queue.CampaignWorker
+	var webhookWorker *queue.WebhookWorker
+	var deliveryReceiptRelay *inbound.DeliveryReceiptRelay
+	if runsWorkers {
+		stream, err := queue.BindVersionedStream(
+			ctx,
+			nc,
+			queue.StreamName,
+			queue.StreamSubject,
+			cfg.NATSStreamReplicas,
+		)
+		if err != nil {
+			slog.Error("failed to bind outbound stream", "error", err)
+			os.Exit(1)
+		}
+		consumer, err := queue.BindConsumer(
+			ctx,
+			stream,
+			queue.OutboundConsumerName,
+			queue.StreamSubject,
+		)
+		if err != nil {
+			slog.Error("failed to bind outbound consumer", "error", err)
+			os.Exit(1)
+		}
+		worker = queue.NewWorker(ctx, consumer, orchestrator)
+		slog.Info("message worker started", "consumer", queue.OutboundConsumerName)
+
+		campStream, err := queue.BindVersionedStream(
+			ctx,
+			nc,
+			queue.CampaignStreamName,
+			queue.CampaignSubject,
+			cfg.NATSStreamReplicas,
+		)
+		if err != nil {
+			slog.Error("failed to bind campaign stream", "error", err)
+			os.Exit(1)
+		}
+		campConsumer, err := queue.BindConsumer(
+			ctx,
+			campStream,
+			queue.CampaignConsumerName,
+			queue.CampaignSubject,
+		)
+		if err != nil {
+			slog.Error("failed to bind campaign consumer", "error", err)
+			os.Exit(1)
+		}
+		campaignWorker = queue.NewCampaignWorker(ctx, campConsumer, campaignRepo, connectionRepo, dispatchRepo, publisher)
+		slog.Info("campaign worker started", "consumer", queue.CampaignConsumerName)
+
+		var verbsEngine *webhook.VerbsEngine
+		if cfg.IsDevelopment() {
+			verbsEngine = webhook.NewVerbsEngine(publisher, contactRepo, userActionLogRepo, connectionRepo)
+		} else {
+			slog.Info("webhook response verbs disabled outside development/test")
+		}
+		webhookDispatcher := webhook.NewDefaultDispatcher(webhookSubRepo, webhookDLQRepo, wsRepo, nil, verbsEngine)
+		webhookWorker, err = queue.NewWebhookWorker(ctx, nc, webhookDispatcher, webhookSubRepo, cfg.NATSStreamReplicas)
+		if err != nil {
+			slog.Error("failed to start webhook worker", "error", err)
+			os.Exit(1)
+		}
+		webhookWorker.SetWorkspaceRepository(wsRepo)
+		deliveryReceiptRelay = inbound.NewDeliveryReceiptRelay(ctx, dispatchRepo, publisher, time.Second)
+	}
 
 	slog.Info("rate limiter configured", "rps", 10, "burst", 10)
-	slog.Info("queue depth limit", "max", 1000)
+	slog.Info("durable workspace queue limit", "max_per_workspace", queue.MaxQueueDepth)
 	if cfg.AdminPassword == "pergo-dev-2026" {
 		slog.Warn("admin panel running with default password 'pergo-dev-2026'. Change PERGO_ADMIN_PASSWORD in production.")
 	} else {
@@ -293,8 +474,9 @@ func main() {
 	// --- Shutdown orchestrator ---
 	orch := shutdown.NewOrchestrator()
 
-	// Register cleanup in reverse order of startup.
-	// Shutdown order: Echo → debug → audit → worker → NATS → pgxpool → sqlDB
+	// Register cleanup in reverse order of startup. Producers are stopped and
+	// awaited before the audit sink is closed.
+	// Shutdown order: Echo → debug → sessions → workers → audit → NATS → pgxpool → sqlDB
 	orch.Register(func() error {
 		slog.Info("closing sql.DB")
 		return db.Close()
@@ -309,38 +491,45 @@ func main() {
 		nc.Close()
 		return nil
 	})
-	// Worker shutdown runs before NATS close — drains the consumer
-	orch.Register(func() error {
-		slog.Info("stopping webhook worker")
-		webhookWorker.Stop()
-		return nil
-	})
-	orch.Register(func() error {
-		slog.Info("stopping campaign worker")
-		campaignWorker.Stop()
-		return nil
-	})
-	orch.Register(func() error {
-		slog.Info("stopping message worker")
-		worker.Stop()
-		return nil
-	})
-	// Session manager stops all device sessions before worker drains
-	orch.Register(func() error {
-		slog.Info("stopping all WhatsApp sessions")
-		sessionManager.StopAll()
-		return nil
-	})
 	orch.Register(func() error {
 		slog.Info("flushing audit buffer")
 		err := auditWriter.Close()
 		slog.Info("audit buffer flushed")
 		return err
 	})
+	if runsWorkers {
+		orch.Register(func() error {
+			slog.Info("stopping delivery receipt relay")
+			deliveryReceiptRelay.Stop()
+			return nil
+		})
+		// Worker shutdown runs before NATS close — drains the consumer.
+		orch.Register(func() error {
+			slog.Info("stopping webhook worker")
+			webhookWorker.Stop()
+			return nil
+		})
+		orch.Register(func() error {
+			slog.Info("stopping campaign worker")
+			campaignWorker.Stop()
+			return nil
+		})
+		orch.Register(func() error {
+			slog.Info("stopping message worker")
+			worker.Stop()
+			return nil
+		})
+		// Session manager stops all device sessions before worker drains.
+		orch.Register(func() error {
+			slog.Info("stopping all WhatsApp sessions")
+			sessionManager.StopAll()
+			return nil
+		})
+	}
 	if debugSrv != nil {
 		orch.Register(func() error {
 			slog.Info("shutting down debug server")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			return debugSrv.Shutdown(ctx)
 		})
@@ -350,14 +539,21 @@ func main() {
 	apiKeyRepo := repository.NewAPIKeyRepository(pool)
 	messageIdempotencyRepo := repository.NewMessageIdempotencyRepository(pool)
 	wabaTemplateRepo := repository.NewWABATemplateRepository(pool)
+	adminSessionRepo := repository.NewAdminSessionRepository(pool)
 
 	wabaTemplateHandler := admin.NewWABATemplateHandler(wabaTemplateRepo, connectionRepo)
+	wabaTemplateHandler.BaseURL = metaGraphBaseURL
 	userLogsHandler := admin.NewUserLogsHandler(userActionLogRepo)
 	chatwootAdminHandler := admin.NewChatwootAdminHandler(integrationRepo)
 	typebotAdminHandler := admin.NewTypebotSettingsHandler(integrationRepo, connectionRepo)
 
 	// --- Echo HTTP server ---
 	e := echosrv.New()
+	// Do not trust spoofable forwarding headers inside the process. Cloud Run
+	// edge controls provide the shared client-aware rate limit; this local
+	// limiter intentionally keys by the direct peer as a fail-closed fallback.
+	e.IPExtractor = echo.ExtractIPDirect()
+	e.Use(profileAccessMiddleware(cfg.RuntimeProfile))
 
 	// Redirect /admin to /admin/ to prevent trailing-slash 404s
 	e.GET("/admin", func(c *echo.Context) error {
@@ -404,16 +600,19 @@ func main() {
 
 	// --- WABA Inbound Webhook handler ---
 	wabaWebhookHandler := handler.NewWABAWebhookHandler(connectionRepo, inboundProcessor, mediaEngine)
+	wabaWebhookHandler.SetBaseURL(metaGraphBaseURL)
 	e.GET("/webhooks/waba/:workspace_id", wabaWebhookHandler.HandleGet)
 	e.POST("/webhooks/waba/:workspace_id", wabaWebhookHandler.HandlePost)
 
-	// --- Chatwoot Inbound Webhook handler ---
-	chatwootWebhookHandler := handler.NewChatwootWebhookHandler(pool, chatwootMappingRepo, contactRepo, publisher)
-	e.POST("/api/integrations/chatwoot", chatwootWebhookHandler.Handle)
-
-	// --- Typebot Inbound Webhook handler ---
-	typebotWebhookHandler := handler.NewTypebotWebhookHandler(pool, publisher)
-	e.POST("/api/integrations/typebot", typebotWebhookHandler.Handle)
+	if cfg.IsDevelopment() {
+		// Chatwoot does not support a custom Authorization header on outgoing
+		// webhooks. Keep both experimental integrations out of deployed
+		// profiles until each has a dedicated, scoped credential protocol.
+		chatwootWebhookHandler := handler.NewChatwootWebhookHandler(pool, chatwootMappingRepo, contactRepo, publisher)
+		e.POST("/api/integrations/chatwoot", chatwootWebhookHandler.Handle)
+		typebotWebhookHandler := handler.NewTypebotWebhookHandler(pool, publisher)
+		e.POST("/api/integrations/typebot", typebotWebhookHandler.Handle)
+	}
 
 	// --- Landing Page ---
 	e.POST("/locale", handler.LocalePost)
@@ -435,20 +634,20 @@ func main() {
 		return admin.LoginPage(c, false)
 	})
 	adminPublic.POST("/login", func(c *echo.Context) error {
-		return admin.LoginPost(c, wsRepo, cfg.AdminPassword)
-	})
+		return admin.LoginPost(c, adminSessionRepo, cfg.AdminPassword)
+	}, middleware.IPRateLimiterMiddleware(loginRateLimiter))
 	adminPublic.POST("/login/", func(c *echo.Context) error {
-		return admin.LoginPost(c, wsRepo, cfg.AdminPassword)
-	})
+		return admin.LoginPost(c, adminSessionRepo, cfg.AdminPassword)
+	}, middleware.IPRateLimiterMiddleware(loginRateLimiter))
 	adminPublic.POST("/logout", func(c *echo.Context) error {
-		return admin.Logout(c)
+		return admin.Logout(c, adminSessionRepo)
 	})
 
 	// Protected admin routes (session auth required)
 	adminGroup := e.Group("/admin")
 	adminGroup.Use(middleware.HTMLLocalizer())
 	adminGroup.Use(middleware.HTMXMiddleware())
-	adminGroup.Use(middleware.SessionAuthMiddleware())
+	adminGroup.Use(middleware.SessionAuthMiddleware(adminSessionRepo))
 	adminGroup.Use(middleware.DashboardAuditMiddleware(userActionLogRepo))
 	adminGroup.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
@@ -576,14 +775,16 @@ func main() {
 
 	// Device/Connection management routes
 	deviceHandler := &admin.DeviceHandler{
-		Sessions:            sessionRegistry,
-		Manager:             sessionManager,
-		Connections:         connectionRepo,
-		Publisher:           publisher,
-		NC:                  nc,
-		TemplatesRepo:       wabaTemplateRepo,
-		ExternalURL:         cfg.ExternalURL,
-		WhatsAppMockEnabled: cfg.WhatsAppMockEnabled,
+		Sessions:              sessionRegistry,
+		Manager:               sessionManager,
+		SessionControlEnabled: runsWorkers && cfg.IsDevelopment(),
+		Connections:           connectionRepo,
+		Publisher:             publisher,
+		NC:                    nc,
+		TemplatesRepo:         wabaTemplateRepo,
+		ExternalURL:           cfg.ExternalURL,
+		WhatsAppMockEnabled:   cfg.WhatsAppMockEnabled,
+		MetaGraphBaseURL:      metaGraphBaseURL,
 	}
 	adminGroup.GET("/devices", deviceHandler.List)
 	adminGroup.GET("/connections", deviceHandler.List)
@@ -594,7 +795,9 @@ func main() {
 	adminGroup.POST("/devices/create", deviceHandler.Create)
 	adminGroup.GET("/devices/test", deviceHandler.TestForm)
 	adminGroup.POST("/devices/test", deviceHandler.RunTest)
-	adminGroup.GET("/devices/test/ws", deviceHandler.WS)
+	if cfg.IsDevelopment() {
+		adminGroup.GET("/devices/test/ws", deviceHandler.WS)
+	}
 
 	// Telemetry page (system health: sessions, NATS, uptime)
 	telemetryHandler := &admin.TelemetryHandler{
@@ -613,13 +816,12 @@ func main() {
 	adminGroup.POST("/workspaces/:workspace_id/templates/:template_id/sync", wabaTemplateHandler.Sync)
 	adminGroup.DELETE("/workspaces/:workspace_id/templates/:template_id", wabaTemplateHandler.Delete)
 
-	// Chatwoot integration routes
-	adminGroup.GET("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.GetSettings)
-	adminGroup.POST("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.PostSettings)
-
-	// Typebot integration routes
-	adminGroup.GET("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.GetSettings)
-	adminGroup.POST("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.PostSettings)
+	if cfg.IsDevelopment() {
+		adminGroup.GET("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.GetSettings)
+		adminGroup.POST("/workspaces/:workspace_id/integrations/chatwoot", chatwootAdminHandler.PostSettings)
+		adminGroup.GET("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.GetSettings)
+		adminGroup.POST("/workspaces/:workspace_id/integrations/typebot", typebotAdminHandler.PostSettings)
+	}
 
 	// Webhooks & DLQ routes
 	webhookHandler := admin.NewWebhookDLQHandler(webhookDLQRepo, webhookSubRepo, wsRepo, publisher)
@@ -686,37 +888,39 @@ func main() {
 	})
 
 	// Start HTTP server
-	srv := &http.Server{
-		Addr:    net.JoinHostPort("", cfg.ServerPort),
-		Handler: e,
+	srv := newHTTPServer(net.JoinHostPort("", cfg.ServerPort), e)
+
+	runsHTTP := profileRunsHTTP(cfg.RuntimeProfile)
+	if runsHTTP {
+		// Register Echo shutdown in orchestrator (runs first — stops accepting new requests).
+		orch.Register(func() error {
+			slog.Info("shutting down HTTP server")
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			return srv.Shutdown(ctx)
+		})
+
+		go func() {
+			slog.Info("starting server", "port", cfg.ServerPort, "profile", cfg.RuntimeProfile)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("server error", "error", err)
+				os.Exit(1)
+			}
+		}()
 	}
-
-	// Register Echo shutdown in orchestrator (runs first — stops accepting new requests)
-	orch.Register(func() error {
-		slog.Info("shutting down HTTP server")
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		return srv.Shutdown(ctx)
-	})
-
-	// Restore persisted WhatsApp Web sessions without delaying HTTP readiness.
-	startWhatsAppRestoration(ctx, sessionManager)
-
-	go func() {
-		slog.Info("starting server", "port", cfg.ServerPort)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
-	}()
+	if runsWorkers && cfg.IsDevelopment() {
+		// Restore persisted WhatsApp Web sessions only in worker-capable profiles.
+		startWhatsAppRestoration(ctx, sessionManager)
+	}
 
 	// --- Graceful shutdown on SIGTERM/SIGINT ---
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	slog.Info("received shutdown signal", "signal", sig)
+	managedShutdown = true
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer shutdownCancel()
 
 	if err := orch.Shutdown(shutdownCtx); err != nil {
@@ -728,6 +932,21 @@ func main() {
 }
 
 // --- helpers ---
+
+// newHTTPServer applies the same bounded header/body-read and idle policies to
+// every HTTP-serving runtime profile. WriteTimeout intentionally remains zero:
+// admin endpoints may stream responses and are instead bounded by their own
+// request contexts.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
 
 // runServer blocks until ctx is cancelled. Used by tests to simulate server lifecycle.
 func runServer(ctx context.Context, pool *pgxpool.Pool, db *sql.DB) error {
@@ -746,6 +965,77 @@ func startWhatsAppRestoration(ctx context.Context, manager *session.Manager) {
 			slog.Error("failed to restore WhatsApp sessions", "error", err)
 		}
 	}()
+}
+
+func resolvedKEK(cfg *config.Config) []byte {
+	if len(cfg.KEKBytes) == 32 {
+		return cfg.KEKBytes
+	}
+	// Config validation guarantees this branch is development/test only.
+	kek := make([]byte, 32)
+	copy(kek, []byte("dev-development-key-32-bytes-kek"))
+	return kek
+}
+
+func applyRuntimeProfileArgument(cfg *config.Config, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("usage: pergo [api|webhook|worker|migrate|mcp]")
+	}
+	switch args[0] {
+	case config.RuntimeAPI, config.RuntimeWebhook, config.RuntimeWorker, config.RuntimeMigrate:
+		cfg.RuntimeProfile = args[0]
+		return nil
+	default:
+		return fmt.Errorf("unknown runtime profile %q", args[0])
+	}
+}
+
+func profileRunsHTTP(profile string) bool {
+	return profile == config.RuntimeAll ||
+		profile == config.RuntimeAPI ||
+		profile == config.RuntimeWebhook
+}
+
+func profileRunsWorkers(profile string) bool {
+	return profile == config.RuntimeAll || profile == config.RuntimeWorker
+}
+
+func connectConfiguredNATS(cfg *config.Config) (*nats.Conn, error) {
+	return queue.Connect(queue.ConnectionConfig{
+		URLs:            cfg.NATSURLs,
+		CredentialsFile: cfg.NATSCredentialsFile,
+		CAFile:          cfg.NATSCAFile,
+		TLSServerName:   cfg.NATSTLSServerName,
+	})
+}
+
+func profileAccessMiddleware(profile string) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			path := c.Request().URL.Path
+			isHealth := path == "/healthz" || path == "/readyz"
+			isWebhook := strings.HasPrefix(path, "/webhooks/") ||
+				path == "/api/integrations/chatwoot" ||
+				path == "/api/integrations/typebot"
+
+			switch profile {
+			case config.RuntimeAll:
+				return next(c)
+			case config.RuntimeAPI:
+				if !isWebhook {
+					return next(c)
+				}
+			case config.RuntimeWebhook:
+				if isHealth || isWebhook {
+					return next(c)
+				}
+			}
+			return c.NoContent(http.StatusNotFound)
+		}
+	}
 }
 
 // natsConn wraps *nats.Conn to satisfy the handler.NATSConn interface.

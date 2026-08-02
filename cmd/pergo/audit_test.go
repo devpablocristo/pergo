@@ -387,6 +387,53 @@ func TestWriterCloseDrains(t *testing.T) {
 	}
 }
 
+func TestAuditPartitionMaintenanceCreatesSixMonthHorizonIdempotently(t *testing.T) {
+	pool := mustAuditPool(t)
+	defer pool.Close()
+
+	db, err := postgres.NewSQLDB(pool)
+	if err != nil {
+		t.Fatalf("NewSQLDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	for run := 0; run < 2; run++ {
+		if err := postgres.MaintainAuditPartitions(t.Context(), db); err != nil {
+			t.Fatalf("MaintainAuditPartitions run %d: %v", run+1, err)
+		}
+	}
+
+	var attached int
+	err = pool.QueryRow(
+		t.Context(),
+		`SELECT count(*)
+		 FROM generate_series(0, $1) AS offsets(month_offset)
+		 JOIN pg_class child
+		   ON child.relname = (
+		     'audit_logs_y'
+		     || to_char(CURRENT_DATE + make_interval(months => offsets.month_offset), 'YYYY')
+		     || 'm'
+		     || to_char(CURRENT_DATE + make_interval(months => offsets.month_offset), 'MM')
+		   )
+		  AND child.relispartition
+		 JOIN pg_namespace namespace
+		   ON namespace.oid = child.relnamespace
+		  AND namespace.nspname = current_schema()
+		 JOIN pg_inherits inheritance ON inheritance.inhrelid = child.oid
+		 JOIN pg_class parent
+		   ON parent.oid = inheritance.inhparent
+		  AND parent.relname = 'audit_logs'`,
+		postgres.AuditPartitionMonthsAhead,
+	).Scan(&attached)
+	if err != nil {
+		t.Fatalf("query attached audit partitions: %v", err)
+	}
+	want := postgres.AuditPartitionMonthsAhead + 1
+	if attached != want {
+		t.Fatalf("attached audit partitions in horizon = %d, want %d", attached, want)
+	}
+}
+
 // --- helpers ---
 
 func mustAuditPool(t *testing.T) *pgxpool.Pool {

@@ -3,12 +3,14 @@ package outbound_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/domain"
 	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/outbound"
+	"github.com/pablojhp.pergo/internal/platform/messagebus"
 	"github.com/pablojhp.pergo/internal/repository"
 )
 
@@ -79,8 +81,6 @@ func (f *fakeQueueDepthTracker) Exceeds(workspaceID uuid.UUID, limit int64) bool
 func (f *fakeQueueDepthTracker) Increment(workspaceID uuid.UUID) {
 	f.increment = workspaceID
 }
-
-
 
 // fakeRouteResolver mocks connection lookups.
 type fakeRouteResolver struct {
@@ -178,6 +178,59 @@ func TestProcessor_Ingest(t *testing.T) {
 		_, err := p.Ingest(context.Background(), wsID, traceID, req)
 		if !errors.Is(err, outbound.ErrQueueFull) {
 			t.Errorf("got error %v, want ErrQueueFull", err)
+		}
+	})
+
+	t.Run("Durable publisher capacity maps to ErrQueueFull", func(t *testing.T) {
+		resolver := &fakeRouteResolver{conn: defaultConn}
+		publisher := &fakePublisher{err: messagebus.ErrWorkspaceQueueCapacity}
+		p := outbound.NewProcessor(nil, nil, resolver, publisher)
+
+		_, err := p.Ingest(context.Background(), wsID, traceID, &domain.CreateMessageRequest{
+			To:      "123456",
+			Channel: "telegram",
+			Body:    "Hold on",
+		})
+		if !errors.Is(err, outbound.ErrQueueFull) {
+			t.Fatalf("got error %v, want ErrQueueFull", err)
+		}
+	})
+
+	t.Run("Serialized payload over transport ceiling is rejected before publish", func(t *testing.T) {
+		resolver := &fakeRouteResolver{conn: defaultConn}
+		publisher := &fakePublisher{}
+		p := outbound.NewProcessor(nil, nil, resolver, publisher)
+
+		_, err := p.Ingest(context.Background(), wsID, traceID, &domain.CreateMessageRequest{
+			To:      "123456",
+			Channel: "telegram",
+			Body:    strings.Repeat("x", messagebus.MaxPayloadBytes),
+		})
+		if !errors.Is(err, messagebus.ErrPayloadTooLarge) {
+			t.Fatalf("got error %v, want ErrPayloadTooLarge", err)
+		}
+		if len(publisher.published) != 0 {
+			t.Fatalf("publisher received %d payloads, want 0", len(publisher.published))
+		}
+	})
+
+	t.Run("Split API can sustain more than legacy in-memory limit", func(t *testing.T) {
+		resolver := &fakeRouteResolver{conn: defaultConn}
+		publisher := &fakePublisher{}
+		p := outbound.NewProcessor(nil, nil, resolver, publisher)
+
+		for i := 0; i < 1001; i++ {
+			_, err := p.Ingest(context.Background(), wsID, uuid.NewString(), &domain.CreateMessageRequest{
+				To:      "123456",
+				Channel: "telegram",
+				Body:    "sustained traffic",
+			})
+			if err != nil {
+				t.Fatalf("ingest %d failed from process-local counter: %v", i+1, err)
+			}
+		}
+		if got := len(publisher.published); got != 1001 {
+			t.Fatalf("published %d messages, want 1001", got)
 		}
 	})
 

@@ -106,6 +106,7 @@ func setupWebhookRoutes(t *testing.T) (*echo.Echo, *repository.WebhookDLQReposit
 
 func TestAdminWebhookDLQHandlers(t *testing.T) {
 	e, dlqRepo, subRepo, wsRepo, _ := setupWebhookRoutes(t)
+	const subscriptionSecret = "0123456789abcdef0123456789abcdef"
 
 	ctx := context.Background()
 	ws, err := wsRepo.Create(ctx, "wh_admin_test_ws_"+uuid.New().String())
@@ -132,7 +133,7 @@ func TestAdminWebhookDLQHandlers(t *testing.T) {
 	// 2. POST /admin/workspaces/:workspace_id/webhooks/subscriptions
 	formData := url.Values{}
 	formData.Set("url", "https://example.com/webhook-endpoint")
-	formData.Set("secret", "supersecret123")
+	formData.Set("secret", subscriptionSecret)
 	formData.Add("event_types", "*")
 	req = httptest.NewRequest(http.MethodPost, "/admin/workspaces/"+ws.ID.String()+"/webhooks/subscriptions", strings.NewReader(formData.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -156,7 +157,7 @@ func TestAdminWebhookDLQHandlers(t *testing.T) {
 		t.Fatalf("expected 1 subscription, got %d", len(subs))
 	}
 	sub := subs[0]
-	if sub.URL != "https://example.com/webhook-endpoint" || string(sub.Secret) != "supersecret123" {
+	if sub.URL != "https://example.com/webhook-endpoint" || string(sub.Secret) != subscriptionSecret {
 		t.Errorf("subscription fields mismatch: %+v", sub)
 	}
 
@@ -189,7 +190,7 @@ func TestAdminWebhookDLQHandlers(t *testing.T) {
 	if updatedSub.URL != "https://example.com/updated-endpoint" {
 		t.Errorf("expected URL to update, got %q", updatedSub.URL)
 	}
-	if string(updatedSub.Secret) != "supersecret123" {
+	if string(updatedSub.Secret) != subscriptionSecret {
 		t.Errorf("expected secret to be preserved, got %q", string(updatedSub.Secret))
 	}
 	if len(updatedSub.EventTypes) != 2 || updatedSub.EventTypes[0] != "message.sent" || updatedSub.EventTypes[1] != "message.received" {

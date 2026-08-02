@@ -226,10 +226,9 @@ func (e *VerbsEngine) logActionResults(
 		Metadata:    metaBytes,
 	}
 
-	// Insert in background context to prevent holding any resources
-	go func() {
-		if err := e.logsRepo.Insert(context.Background(), logEntry); err != nil {
-			slog.Error("failed to insert webhook verbs action log", "error", err, "trace_id", traceID)
-		}
-	}()
+	logCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := e.logsRepo.Insert(logCtx, logEntry); err != nil {
+		slog.Error("failed to insert webhook verbs action log", "error", err, "trace_id", traceID)
+	}
 }

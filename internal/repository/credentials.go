@@ -16,7 +16,7 @@ var ErrCredentialsNotFound = errors.New("credentials not found")
 
 // CredentialsRepository provides CRUD operations for channel credentials, shimmed on top of connections table.
 type CredentialsRepository struct {
-	pool      *pgxpool.Pool
+	pool     *pgxpool.Pool
 	provider CredentialProvider
 }
 
@@ -60,7 +60,9 @@ func (r *CredentialsRepository) Save(ctx context.Context, workspaceID uuid.UUID,
 		// Update existing connection's credentials
 		_, err = r.pool.Exec(ctx,
 			`UPDATE connections 
-			 SET credentials = $2, key_id = $3, key_version = $4, sender_identity = COALESCE(NULLIF($5, ''), sender_identity), updated_at = now() 
+			 SET credentials = $2, key_id = $3, key_version = $4,
+			     credential_revision = credential_revision + 1,
+			     sender_identity = COALESCE(NULLIF($5, ''), sender_identity), updated_at = now()
 			 WHERE id = $1`,
 			connID, ciphertext, keyID, keyVersion, senderIdentity,
 		)

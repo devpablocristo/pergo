@@ -91,7 +91,10 @@ templ CampaignRow(workspaceID uuid.UUID, c domain.Campaign) {
 			} else if c.Status == domain.CampaignStatusSending {
 				<span class="badge badge-sm bg-blue-50 text-blue-700 border-blue-200 px-2 py-0.5 text-xs font-semibold animate-pulse">Enviando</span>
 			} else if c.Status == domain.CampaignStatusCompleted {
-				<span class="badge badge-sm bg-emerald-50 text-emerald-700 border-emerald-200 px-2 py-0.5 text-xs font-semibold">Concluída</span>
+				<span
+					class="badge badge-sm bg-emerald-50 text-emerald-700 border-emerald-200 px-2 py-0.5 text-xs font-semibold"
+					title="Todos os destinatários foram aceitos pela fila de saída; a entrega é acompanhada por mensagem."
+				>Enfileirada</span>
 			} else if c.Status == domain.CampaignStatusCancelled {
 				<span class="badge badge-sm bg-rose-50 text-rose-700 border-rose-200 px-2 py-0.5 text-xs font-semibold">Cancelada</span>
 			}
@@ -200,7 +203,14 @@ templ CampaignCreateForm(workspaceID uuid.UUID, templates []repository.WABATempl
 					<select id="template_select" name="template_select" onchange="renderWABAVariables()" class="form-input border border-zinc-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-950 focus:border-transparent bg-white w-full">
 						<option value="">-- Escolha um template --</option>
 						for _, t := range templates {
-							<option value={ t.Name } data-connection={ t.ConnectionID.String() } data-components={ string(t.Components) }>{ t.Name } ({ t.Language })</option>
+							if t.Status == "APPROVED" {
+								<option
+									value={ t.ID.String() }
+									data-connection={ t.ConnectionID.String() }
+									data-language={ t.Language }
+									data-components={ string(t.Components) }
+								>{ t.Name } ({ t.Language })</option>
+							}
 						}
 					</select>
 				</div>

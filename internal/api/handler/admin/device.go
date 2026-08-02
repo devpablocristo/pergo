@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +19,11 @@ import (
 	"github.com/nats-io/nats.go"
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
+	"github.com/pablojhp.pergo/internal/channel/whatsapp"
 	"github.com/pablojhp.pergo/internal/domain"
 	"github.com/pablojhp.pergo/internal/i18n"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/internal/session"
 	"github.com/pablojhp.pergo/templates/pages"
@@ -41,14 +44,16 @@ type DevicePublisher interface {
 
 // DeviceHandler handles admin operations for unified connections management.
 type DeviceHandler struct {
-	Sessions            *session.ActiveSession
-	Manager             *session.Manager
-	Connections         DeviceConnectionStore
-	Publisher           DevicePublisher
-	NC                  *nats.Conn
-	TemplatesRepo       *repository.WABATemplateRepository
-	ExternalURL         string
-	WhatsAppMockEnabled bool
+	Sessions              *session.ActiveSession
+	Manager               *session.Manager
+	SessionControlEnabled bool
+	Connections           DeviceConnectionStore
+	Publisher             DevicePublisher
+	NC                    *nats.Conn
+	TemplatesRepo         *repository.WABATemplateRepository
+	ExternalURL           string
+	WhatsAppMockEnabled   bool
+	MetaGraphBaseURL      string
 }
 
 // pairingState holds the current QR pairing state for a phone number.
@@ -83,12 +88,16 @@ func (h *DeviceHandler) List(c *echo.Context) error {
 // PairForm renders the unified new connection modal fragment.
 // GET /admin/devices/pair-form
 func (h *DeviceHandler) PairForm(c *echo.Context) error {
-	return mw.Render(c, http.StatusOK, pages.PairForm(h.WhatsAppMockEnabled))
+	return mw.Render(c, http.StatusOK, pages.PairForm(h.SessionControlEnabled, h.WhatsAppMockEnabled))
 }
 
 // StartPairing begins the QR pairing flow for a new WhatsApp Web connection.
 // POST /admin/devices/pair — expects form field "phone" or "connection_id"
 func (h *DeviceHandler) StartPairing(c *echo.Context) error {
+	if !h.SessionControlEnabled {
+		return c.String(http.StatusServiceUnavailable, "WhatsApp Web pairing is owned by the worker runtime and is unavailable without a durable coordinator")
+	}
+
 	phone := c.FormValue("phone")
 	proxyURL := c.FormValue("proxy_url")
 	var existingConnID *uuid.UUID
@@ -168,6 +177,9 @@ func (h *DeviceHandler) GetQR(c *echo.Context) error {
 	if phone == "" {
 		return c.String(http.StatusBadRequest, "phone is required")
 	}
+	if !h.SessionControlEnabled {
+		return c.String(http.StatusServiceUnavailable, "WhatsApp Web pairing is owned by the worker runtime and is unavailable without a durable coordinator")
+	}
 
 	pairingSessionsMu.Lock()
 	ps, ok := pairingSessions[phone]
@@ -206,7 +218,11 @@ func (h *DeviceHandler) Disconnect(c *echo.Context) error {
 		return c.String(http.StatusInternalServerError, "failed to get connection")
 	}
 
-	// If WhatsApp Web, stop active session
+	// A separated API process cannot mutate a worker-owned WhatsApp Web
+	// lifecycle, even when a legacy row happens to be missing its JID.
+	if conn.Channel == "whatsapp" && !h.SessionControlEnabled {
+		return c.String(http.StatusConflict, "WhatsApp Web sessions are owned by the worker runtime; disconnect requires a durable coordinator")
+	}
 	if conn.Channel == "whatsapp" && conn.JID != nil && *conn.JID != "" {
 		h.Sessions.DisconnectByJID(*conn.JID)
 	}
@@ -292,9 +308,13 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 		wabaAccountID := c.FormValue("waba_account_id")
 		token := c.FormValue("token")
 		verifyToken := c.FormValue("verify_token")
+		appSecret := c.FormValue("app_secret")
 
-		if phoneNumberID == "" || wabaAccountID == "" || token == "" {
-			return c.String(http.StatusBadRequest, "phone_number_id, waba_account_id, and token are required")
+		if phoneNumberID == "" || wabaAccountID == "" || token == "" || verifyToken == "" || appSecret == "" {
+			return c.String(http.StatusBadRequest, "phone_number_id, waba_account_id, token, verify_token, and app_secret are required")
+		}
+		if err := whatsapp.ValidateWebhookSecrets(appSecret, verifyToken); err != nil {
+			return c.String(http.StatusBadRequest, err.Error())
 		}
 
 		senderIdentity = phoneNumberID
@@ -304,6 +324,7 @@ func (h *DeviceHandler) Create(c *echo.Context) error {
 			Token:         token,
 			WABAAccountID: wabaAccountID,
 			VerifyToken:   verifyToken,
+			AppSecret:     appSecret,
 		}
 
 		connID = uuid.New()
@@ -480,8 +501,16 @@ func (h *DeviceHandler) RunTest(c *echo.Context) error {
 // WS upgrades the connection to WebSocket and streams NATS events live to the client.
 // GET /admin/devices/test/ws
 func (h *DeviceHandler) WS(c *echo.Context) error {
+	workspaceID, err := uuid.Parse(c.QueryParam("workspace_id"))
+	if err != nil {
+		return c.String(http.StatusBadRequest, "valid workspace_id is required")
+	}
+	externalURL, err := url.Parse(h.ExternalURL)
+	if err != nil || externalURL.Scheme == "" || externalURL.Host == "" {
+		return c.String(http.StatusServiceUnavailable, "websocket origin is not configured")
+	}
 	ws, err := websocket.Accept(c.Response(), c.Request(), &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+		OriginPatterns: []string{externalURL.Scheme + "://" + externalURL.Host},
 	})
 	if err != nil {
 		slog.Error("websocket accept failed in device test", "error", err)
@@ -494,26 +523,30 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 	// Channel to receive NATS messages
 	ch := make(chan *nats.Msg, 128)
 
-	// Subscribe to outgoing messages
-	sub1, err := h.NC.ChanSubscribe("messages.>", ch)
+	// The development console is tenant-scoped and observes only the immutable
+	// v2 physical protocol. It never subscribes to global wildcard subjects.
+	outboundSubject := "pergo.v2.outbound." + workspaceID.String()
+	inboundSubject := "pergo.v2.inbound." + workspaceID.String()
+	webhookSubject := "pergo.v2.webhook_events." + workspaceID.String()
+	sub1, err := h.NC.ChanSubscribe(outboundSubject, ch)
 	if err != nil {
-		slog.Error("nats subscribe messages.> failed", "error", err)
+		slog.Error("nats subscribe outbound workspace subject failed", "error", err, "workspace_id", workspaceID)
 		return err
 	}
 	defer func() { _ = sub1.Unsubscribe() }()
 
 	// Subscribe to incoming webhook events
-	sub2, err := h.NC.ChanSubscribe("inbound.events.>", ch)
+	sub2, err := h.NC.ChanSubscribe(inboundSubject, ch)
 	if err != nil {
-		slog.Error("nats subscribe inbound.events.> failed", "error", err)
+		slog.Error("nats subscribe inbound workspace subject failed", "error", err, "workspace_id", workspaceID)
 		return err
 	}
 	defer func() { _ = sub2.Unsubscribe() }()
 
 	// Subscribe to webhook delivery events
-	sub3, err := h.NC.ChanSubscribe("webhooks.events", ch)
+	sub3, err := h.NC.ChanSubscribe(webhookSubject, ch)
 	if err != nil {
-		slog.Error("nats subscribe webhooks.events failed", "error", err)
+		slog.Error("nats subscribe webhook workspace subject failed", "error", err, "workspace_id", workspaceID)
 		return err
 	}
 	defer func() { _ = sub3.Unsubscribe() }()
@@ -551,12 +584,12 @@ func (h *DeviceHandler) WS(c *echo.Context) error {
 				prettyJSON.Write(rawPayload)
 			}
 
-			switch subject {
-			case "messages.outbound":
+			switch {
+			case strings.HasPrefix(subject, "pergo.v2.outbound."):
 				eventType = "outbound"
 				badgeClass = "badge-secondary"
 				title = "Outbound Message Enqueued"
-			case "webhooks.events":
+			case strings.HasPrefix(subject, "pergo.v2.webhook_events."):
 				eventType = "webhook"
 				badgeClass = "badge-danger"
 				title = "Webhook Status Dispatched"
@@ -667,25 +700,28 @@ func (h *DeviceHandler) validateTelegramToken(ctx context.Context, token string)
 }
 
 func (h *DeviceHandler) syncTemplatesFromMeta(ctx context.Context, workspaceID uuid.UUID, connectionID uuid.UUID, config pages.WABAConfig, saveToDB bool) error {
-	baseURL := "https://graph.facebook.com/v18.0"
+	baseURL := h.MetaGraphBaseURL
+	if baseURL == "" {
+		baseURL = metaapi.BaseURL(metaapi.DefaultVersion)
+	}
 	metaURL := fmt.Sprintf("%s/%s/message_templates?limit=100", baseURL, config.WABAAccountID)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create Meta API request: %w", err)
+		return errors.New("failed to create Meta API request")
 	}
 	req.Header.Set("Authorization", "Bearer "+config.Token)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to connect to Meta API: %w", err)
+		return errors.New("failed to connect to Meta API")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response from Meta: %w", err)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		return errors.New("invalid response from Meta API")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -697,8 +733,12 @@ func (h *DeviceHandler) syncTemplatesFromMeta(ctx context.Context, workspaceID u
 			Error metaError `json:"error"`
 		}
 		var metaErr metaErrorResponse
-		if err := json.Unmarshal(respBytes, &metaErr); err == nil && metaErr.Error.Message != "" {
-			return fmt.Errorf("meta API error: %s (code %d)", metaErr.Error.Message, metaErr.Error.Code)
+		if err := json.Unmarshal(respBytes, &metaErr); err == nil && metaErr.Error.Code != 0 {
+			return fmt.Errorf(
+				"meta API error (http_status=%d, code=%d)",
+				resp.StatusCode,
+				metaErr.Error.Code,
+			)
 		}
 		return fmt.Errorf("meta API returned HTTP status %d", resp.StatusCode)
 	}
@@ -718,7 +758,7 @@ func (h *DeviceHandler) syncTemplatesFromMeta(ctx context.Context, workspaceID u
 
 	var metaResp metaTemplatesResponse
 	if err := json.Unmarshal(respBytes, &metaResp); err != nil {
-		return fmt.Errorf("failed to parse Meta response: %w", err)
+		return errors.New("invalid response from Meta API")
 	}
 
 	slog.Info("syncing templates from Meta", "count", len(metaResp.Data), "workspace_id", workspaceID)

@@ -152,6 +152,49 @@ func TestDefaultDispatcher_Dispatch(t *testing.T) {
 		if req.Header.Get("X-PerGo-Signature") == "" {
 			t.Errorf("expected signature header to be present")
 		}
+		if got := req.Header.Get("X-PerGo-Delivery-ID"); got != task.ID.String() {
+			t.Errorf("got X-PerGo-Delivery-ID %q, want %q", got, task.ID)
+		}
+	})
+
+	t.Run("Cross-workspace subscription is hidden before HTTP", func(t *testing.T) {
+		subStore := &mockSubscriptionStore{sub: sub}
+		httpClient := &mockHTTPClient{}
+		d := webhook.NewDefaultDispatcher(subStore, &mockDLQStore{}, nil, httpClient, nil)
+
+		err := d.Dispatch(context.Background(), webhook.WebhookDeliveryTask{
+			SubscriptionID: subID,
+			WorkspaceID:    uuid.New(),
+			Payload:        []byte(`{"event":"test"}`),
+		})
+		if !errors.Is(err, webhook.ErrSubscriptionNotFound) {
+			t.Fatalf("Dispatch error = %v, want ErrSubscriptionNotFound", err)
+		}
+		if len(httpClient.requests) != 0 {
+			t.Fatal("cross-workspace task reached tenant-controlled HTTP endpoint")
+		}
+	})
+
+	t.Run("Oversized successful response is ignored without retrying accepted POST", func(t *testing.T) {
+		subStore := &mockSubscriptionStore{sub: sub}
+		httpClient := &mockHTTPClient{response: &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(io.LimitReader(zeroReader{}, (1<<20)+1)),
+		}}
+		d := webhook.NewDefaultDispatcher(subStore, &mockDLQStore{}, nil, httpClient, nil)
+
+		err := d.Dispatch(context.Background(), webhook.WebhookDeliveryTask{
+			SubscriptionID: subID,
+			WorkspaceID:    wsID,
+			Payload:        []byte(`{"event":"test"}`),
+		})
+		if err != nil {
+			t.Fatalf("Dispatch error = %v, want successful accepted delivery", err)
+		}
+		if len(httpClient.requests) != 1 {
+			t.Fatalf("HTTP requests = %d, want exactly one", len(httpClient.requests))
+		}
 	})
 
 	t.Run("Compliance checks redact PII on inbound events when workspace opted-out", func(t *testing.T) {
@@ -206,10 +249,35 @@ func TestDefaultDispatcher_Dispatch(t *testing.T) {
 			t.Errorf("expected 'from' number to be hashed and redacted, but got original %q", fromVal)
 		}
 		if len(fromVal) != 64 {
-			t.Errorf("expected SHA-256 hex string (64 characters) for 'from', got length %d", len(fromVal))
+			t.Errorf("expected HMAC-SHA-256 hex string (64 characters) for 'from', got length %d", len(fromVal))
 		}
 		if sentEvent["location"] != nil {
 			t.Errorf("expected location to be stripped/nil, got %v", sentEvent["location"])
+		}
+	})
+
+	t.Run("PII opt-out fails closed for malformed inbound payload", func(t *testing.T) {
+		subStore := &mockSubscriptionStore{sub: sub}
+		httpClient := &mockHTTPClient{}
+		d := webhook.NewDefaultDispatcher(
+			subStore,
+			&mockDLQStore{},
+			&mockWorkspaceStore{ws: &repository.Workspace{ID: wsID, PIIOptIn: false}},
+			httpClient,
+			nil,
+		)
+		err := d.Dispatch(context.Background(), webhook.WebhookDeliveryTask{
+			ID:             uuid.New(),
+			SubscriptionID: subID,
+			WorkspaceID:    wsID,
+			Mode:           "inbound",
+			Payload:        []byte(`{"from":`),
+		})
+		if !errors.Is(err, webhook.ErrPIIRedactionFailed) {
+			t.Fatalf("Dispatch error=%v, want ErrPIIRedactionFailed", err)
+		}
+		if len(httpClient.requests) != 0 {
+			t.Fatal("malformed unredacted payload was sent")
 		}
 	})
 
@@ -288,6 +356,23 @@ func TestDefaultDispatcher_WriteToDLQ(t *testing.T) {
 	if *ins.failureReason != "something went wrong" {
 		t.Errorf("got failure reason %s", *ins.failureReason)
 	}
+
+	err = d.WriteToDLQ(context.Background(), uuid.New(), subID, "trace-cross", "msg-cross", "message.sent", payload, 1, "cross")
+	if !errors.Is(err, webhook.ErrSubscriptionNotFound) {
+		t.Fatalf("cross-workspace WriteToDLQ error = %v, want ErrSubscriptionNotFound", err)
+	}
+	if len(dlqStore.inserted) != 1 {
+		t.Fatalf("cross-workspace DLQ inserted data: total=%d", len(dlqStore.inserted))
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
 }
 
 type mockPublisher struct {

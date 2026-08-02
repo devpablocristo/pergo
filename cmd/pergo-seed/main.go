@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type WABAConfig struct {
 	Token         string `json:"token"`
 	WABAAccountID string `json:"waba_account_id"`
 	VerifyToken   string `json:"verify_token"`
+	AppSecret     string `json:"app_secret"`
 }
 
 // inboundPayload matches the audit_logs event payload for inbound messages.
@@ -45,6 +47,14 @@ type inboundPayload struct {
 func main() {
 	slog.SetDefault(obs.NewJSONLogger(os.Stdout))
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	if !cfg.IsDevelopment() {
+		slog.Error("pergo-seed is restricted to development/test environments")
+		os.Exit(1)
+	}
 	ctx := context.Background()
 
 	if err := run(ctx, cfg); err != nil {
@@ -62,8 +72,13 @@ func run(ctx context.Context, cfg *config.Config) error {
 	token := envOrDefault("ACCESS_TOKEN", "")
 	phoneID := envOrDefault("PHONE_NUMBER_ID", "")
 	wabaID := envOrDefault("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
-	if token == "" || phoneID == "" || wabaID == "" {
-		return fmt.Errorf("missing WABA credentials in .env.seed: need ACCESS_TOKEN, PHONE_NUMBER_ID, WHATSAPP_BUSINESS_ACCOUNT_ID")
+	verifyToken := envOrDefault("WABA_VERIFY_TOKEN", "")
+	appSecret := envOrDefault("WABA_APP_SECRET", "")
+	if token == "" || phoneID == "" || wabaID == "" || verifyToken == "" || appSecret == "" {
+		return fmt.Errorf("missing WABA credentials in .env.seed: need ACCESS_TOKEN, PHONE_NUMBER_ID, WHATSAPP_BUSINESS_ACCOUNT_ID, WABA_VERIFY_TOKEN, WABA_APP_SECRET")
+	}
+	if len(verifyToken) < 32 || strings.HasPrefix(verifyToken, "pergo_verify_token_") {
+		return fmt.Errorf("WABA_VERIFY_TOKEN must be a randomly generated value of at least 32 characters")
 	}
 
 	// Derive a display phone number used as the recipient identity.
@@ -103,7 +118,8 @@ func run(ctx context.Context, cfg *config.Config) error {
 		PhoneNumberID: phoneID,
 		Token:         token,
 		WABAAccountID: wabaID,
-		VerifyToken:   "pergo-verify-token",
+		VerifyToken:   verifyToken,
+		AppSecret:     appSecret,
 	})
 	conn, err := ensureConnection(ctx, connRepo, ws.ID, displayPhone, credJSON)
 	if err != nil {
@@ -141,6 +157,10 @@ func ensureConnection(ctx context.Context, repo *repository.ConnectionRepository
 	if err == nil {
 		for _, c := range existing {
 			if c.Channel == "whatsapp_cloud" {
+				if err := repo.SaveCredentials(ctx, c.ID, cred); err != nil {
+					return nil, fmt.Errorf("refresh seeded WABA credentials: %w", err)
+				}
+				c.Credentials = cred
 				return c, nil
 			}
 		}

@@ -44,10 +44,25 @@ func (o *Orchestrator) Shutdown(ctx context.Context) error {
 		// Execute in reverse order (LIFO)
 		for i := len(fns) - 1; i >= 0; i-- {
 			if ctx.Err() != nil {
+				if err == nil {
+					err = ctx.Err()
+				}
 				break
 			}
-			if fnErr := fns[i](); fnErr != nil && err == nil {
-				err = fnErr
+			done := make(chan error, 1)
+			go func(fn func() error) {
+				done <- fn()
+			}(fns[i])
+			select {
+			case fnErr := <-done:
+				if fnErr != nil && err == nil {
+					err = fnErr
+				}
+			case <-ctx.Done():
+				if err == nil {
+					err = ctx.Err()
+				}
+				return
 			}
 		}
 	})

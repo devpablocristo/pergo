@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,7 +60,8 @@ func TestTypebotWebhook_Auth(t *testing.T) {
 		e.Use(middleware.AuthMiddleware(apiKeyRepo))
 		e.POST("/api/integrations/typebot", h.Handle)
 
-		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot?token=invalid-key", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot", nil)
+		req.Header.Set("Authorization", "Bearer invalid-key")
 		rec := httptest.NewRecorder()
 
 		e.ServeHTTP(rec, req)
@@ -76,7 +76,8 @@ func TestTypebotWebhook_Auth(t *testing.T) {
 		e.Use(middleware.AuthMiddleware(apiKeyRepo))
 		e.POST("/api/integrations/typebot", h.Handle)
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/typebot?token=%s", rawKey), strings.NewReader("invalid-json"))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot", strings.NewReader("invalid-json"))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -141,7 +142,8 @@ func TestTypebotWebhookHandler_HappyPath(t *testing.T) {
 		}
 		bodyBytes, _ := json.Marshal(payload)
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/typebot?token=%s", rawKey), bytes.NewReader(bodyBytes))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot", bytes.NewReader(bodyBytes))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -200,7 +202,8 @@ func TestTypebotWebhookHandler_HappyPath(t *testing.T) {
 		}
 		bodyBytes, _ := json.Marshal(payload)
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/typebot?token=%s", rawKey), bytes.NewReader(bodyBytes))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot", bytes.NewReader(bodyBytes))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -229,7 +232,8 @@ func TestTypebotWebhookHandler_HappyPath(t *testing.T) {
 		}
 		bodyBytes, _ := json.Marshal(payload)
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/typebot?token=%s", rawKey), bytes.NewReader(bodyBytes))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/typebot", bytes.NewReader(bodyBytes))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 

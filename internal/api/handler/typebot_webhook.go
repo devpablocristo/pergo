@@ -2,7 +2,7 @@ package handler
 
 import (
 	"encoding/json"
-	"io"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -43,7 +43,13 @@ func (h *TypebotWebhookHandler) Handle(c *echo.Context) error {
 		})
 	}
 
-	body, err := io.ReadAll(c.Request().Body)
+	body, err := readIntegrationWebhookBody(c.Request())
+	if errors.Is(err, errIntegrationWebhookBodyTooLarge) {
+		return c.JSON(http.StatusRequestEntityTooLarge, map[string]string{
+			"code":    "payload_too_large",
+			"message": "request body exceeds 2 MiB",
+		})
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
 			"code":    "bad_request",

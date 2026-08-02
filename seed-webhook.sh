@@ -15,6 +15,7 @@ FROM_PHONE="${1:-15559998877}"
 WORKSPACE_ID="143cde23-5d03-450e-9d37-08282cd2bf2b"
 PHONE_NUMBER_ID="105408512621900"
 DISPLAY_PHONE="15551357931"
+: "${WABA_APP_SECRET:?set WABA_APP_SECRET to the Meta app secret stored on the seeded connection}"
 
 PAYLOAD=$(cat <<EOF
 {
@@ -47,12 +48,15 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
+SIGNATURE="sha256=$(printf '%s' "${PAYLOAD}" | openssl dgst -sha256 -hmac "${WABA_APP_SECRET}" | awk '{print $NF}')"
+
 echo "Triggering WABA webhook for workspace ${WORKSPACE_ID}"
 echo "From: ${FROM_PHONE} (display: ${DISPLAY_PHONE})"
 echo ""
 
 curl -s -X POST "http://localhost:8080/webhooks/waba/${WORKSPACE_ID}" \
   -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: ${SIGNATURE}" \
   -d "${PAYLOAD}" \
   -w "\nHTTP status: %{http_code}\n"
 

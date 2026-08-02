@@ -47,6 +47,17 @@ func TestRetryAttemptParsing(t *testing.T) {
 	}
 }
 
+func TestRetryAttemptPrefersJetStreamMetadata(t *testing.T) {
+	msg := &fakeDispatchMsg{
+		headers:            map[string]string{"X-Retry-Attempt": "1"},
+		deliveryAttempt:    4,
+		hasDeliveryAttempt: true,
+	}
+	if got := retryAttempt(msg); got != 4 {
+		t.Fatalf("retryAttempt = %d, want broker metadata attempt 4", got)
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	tests := []struct {
 		attempt    int
@@ -149,11 +160,17 @@ type fakeDispatchMsg struct {
 	acked    bool
 	nacked   bool
 	nakDelay time.Duration
+
+	deliveryAttempt    int
+	hasDeliveryAttempt bool
 }
 
 func (m *fakeDispatchMsg) Data() []byte               { return m.data }
 func (m *fakeDispatchMsg) Headers() map[string]string { return m.headers }
-func (m *fakeDispatchMsg) Ack() error                 { m.acked = true; return nil }
+func (m *fakeDispatchMsg) DeliveryAttempt() (int, bool) {
+	return m.deliveryAttempt, m.hasDeliveryAttempt
+}
+func (m *fakeDispatchMsg) Ack() error { m.acked = true; return nil }
 func (m *fakeDispatchMsg) NakWithDelay(d time.Duration) error {
 	m.nacked = true
 	m.nakDelay = d
@@ -316,7 +333,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 			t.Errorf("expected disp2 called once, got %d", disp2.calledCount)
 		}
 
-		d, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		d, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("failed to get dispatch from DB: %v", err)
 		}
@@ -355,7 +372,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 			t.Fatalf("expected fallback dispatcher once, got %d", fallback.calledCount)
 		}
 
-		dispatch, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		dispatch, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("get dispatch: %v", err)
 		}
@@ -395,7 +412,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 			t.Errorf("expected disp1 called once, got %d", disp1.calledCount)
 		}
 
-		d, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		d, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("failed to get dispatch from DB: %v", err)
 		}
@@ -404,6 +421,73 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		}
 		if d.ErrorMessage == nil || *d.ErrorMessage != deliveryTransientCode {
 			t.Fatalf("error_message=%v, want %q", d.ErrorMessage, deliveryTransientCode)
+		}
+	})
+
+	t.Run("Exhausted transient retries persist terminal failure and outbox before ACK", func(t *testing.T) {
+		traceID := uuid.New().String()
+		qMsg := &domain.QueueMessage{
+			WorkspaceID: ws.ID,
+			TraceID:     traceID,
+			To:          "+123",
+			Channel:     "whatsapp",
+			Body:        "always transient",
+		}
+		registry := channel.NewRegistry(nil)
+		dispatcher := &fakeDispatcher{err: errors.New("provider unavailable")}
+		registry.Register("whatsapp", dispatcher)
+		orchestrator := NewDispatchOrchestrator(
+			registry,
+			dispatchRepo,
+			nil,
+			nil,
+			nil,
+			nil,
+			2,
+			time.Minute,
+		)
+
+		for attempt := 0; attempt < 2; attempt++ {
+			msg := &fakeDispatchMsg{}
+			_ = orchestrator.Process(ctx, msg, qMsg, attempt)
+			if msg.acked || !msg.nacked {
+				t.Fatalf("attempt %d ack=%v nak=%v, want retry", attempt, msg.acked, msg.nacked)
+			}
+		}
+
+		finalMsg := &fakeDispatchMsg{}
+		_ = orchestrator.Process(ctx, finalMsg, qMsg, 2)
+		if !finalMsg.acked || finalMsg.nacked {
+			t.Fatalf("final delivery ack=%v nak=%v, want terminal ACK", finalMsg.acked, finalMsg.nacked)
+		}
+		if dispatcher.calledCount != 3 {
+			t.Fatalf("provider calls=%d, want 3 bounded attempts", dispatcher.calledCount)
+		}
+
+		dispatch, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
+		if err != nil {
+			t.Fatalf("get terminal dispatch: %v", err)
+		}
+		if dispatch.Status != "failed" {
+			t.Fatalf("status=%q, want failed", dispatch.Status)
+		}
+		if dispatch.ErrorMessage == nil || *dispatch.ErrorMessage != deliveryRetriesCode {
+			t.Fatalf("error_message=%v, want %q", dispatch.ErrorMessage, deliveryRetriesCode)
+		}
+
+		events, err := dispatchRepo.ListPendingProviderDeliveryEvents(ctx, 100)
+		if err != nil {
+			t.Fatalf("list pending delivery events: %v", err)
+		}
+		foundTerminal := false
+		for _, event := range events {
+			if event.DispatchID == dispatch.ID && event.Status == "failed" {
+				foundTerminal = true
+				break
+			}
+		}
+		if !foundTerminal {
+			t.Fatal("terminal failed event was not durably enqueued")
 		}
 	})
 
@@ -445,7 +529,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		if primary.calledCount != 1 || fallback.calledCount != 0 {
 			t.Fatalf("provider calls primary=%d fallback=%d", primary.calledCount, fallback.calledCount)
 		}
-		dispatch, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		dispatch, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("get uncertain dispatch: %v", err)
 		}
@@ -564,7 +648,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 			t.Error("expected message to be acked (stop retries)")
 		}
 
-		d, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		d, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("failed to get dispatch from DB: %v", err)
 		}
@@ -603,7 +687,7 @@ func TestOrchestrator_FallbackLoop(t *testing.T) {
 		if disp1.calledCount != 0 {
 			t.Errorf("expected dispatcher NOT to be called for expired message, got %d", disp1.calledCount)
 		}
-		d, err := dispatchRepo.GetByTraceID(ctx, traceID)
+		d, err := dispatchRepo.GetByTraceID(ctx, qMsg.WorkspaceID, traceID)
 		if err != nil {
 			t.Fatalf("failed to get expired dispatch from DB: %v", err)
 		}

@@ -61,11 +61,11 @@ func TestCreateAPIKey(t *testing.T) {
 		t.Fatalf("Create API key: %v", err)
 	}
 
-	// Key prefix is first 8 characters of the plaintext key
-	if len(plaintext) < 8 {
-		t.Fatalf("expected plaintext key length >= 8, got %d", len(plaintext))
+	// New keys use a 128-bit hexadecimal lookup prefix.
+	if len(plaintext) < crypto.APIKeyPrefixLength {
+		t.Fatalf("expected plaintext key length >= %d, got %d", crypto.APIKeyPrefixLength, len(plaintext))
 	}
-	prefix := plaintext[:8]
+	prefix := plaintext[:crypto.APIKeyPrefixLength]
 	if apiKey.KeyPrefix != prefix {
 		t.Errorf("expected key_prefix %q, got %q", prefix, apiKey.KeyPrefix)
 	}
@@ -365,8 +365,9 @@ func TestHashAPIKeyRoundTrip(t *testing.T) {
 	if len(hash) != 32 {
 		t.Errorf("expected hash length 32, got %d", len(hash))
 	}
-	if prefix != key[:8] {
-		t.Errorf("expected prefix %q, got %q", key[:8], prefix)
+	expectedPrefix := key[:crypto.APIKeyPrefixLength]
+	if prefix != expectedPrefix {
+		t.Errorf("expected prefix %q, got %q", expectedPrefix, prefix)
 	}
 
 	// Verify correct key

@@ -205,3 +205,19 @@ func TestDefaultEngine_Process(t *testing.T) {
 		}
 	})
 }
+
+func TestDefaultEngineDisabledFailsBeforeNetwork(t *testing.T) {
+	engine := media.NewDefaultEngine(storage.NewDisabledS3Client())
+
+	_, err := engine.ProcessOutbound(
+		context.Background(),
+		uuid.New(),
+		"http://127.0.0.1:1/must-not-be-requested",
+	)
+	if !errors.Is(err, storage.ErrMediaDisabled) {
+		t.Fatalf("ProcessOutbound() error = %v, want ErrMediaDisabled", err)
+	}
+	if _, err := engine.ProcessInbound(context.Background(), uuid.New(), "image", []byte("media")); !errors.Is(err, storage.ErrMediaDisabled) {
+		t.Fatalf("ProcessInbound() error = %v, want ErrMediaDisabled", err)
+	}
+}

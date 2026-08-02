@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -153,6 +154,27 @@ func TestOrchestratorTimeout(t *testing.T) {
 
 	if elapsed > 5*time.Second {
 		t.Errorf("shutdown took %v, expected < 5s", elapsed)
+	}
+}
+
+func TestOrchestratorEnforcesDeadline(t *testing.T) {
+	orch := shutdown.NewOrchestrator()
+	orch.Register(func() error {
+		time.Sleep(time.Second)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := orch.Shutdown(ctx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown() error = %v, want context deadline", err)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("Shutdown() took %v, deadline was not enforced", elapsed)
 	}
 }
 

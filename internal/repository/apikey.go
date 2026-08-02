@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"sync"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/pablojhp.pergo/internal/platform/crypto"
 )
+
+var ErrAPIKeyNotFound = errors.New("API key not found")
 
 // APIKey represents an API key entity.
 type APIKey struct {
@@ -26,24 +29,16 @@ type APIKey struct {
 	CreatedAt   time.Time
 }
 
-type cacheEntry struct {
-	value   *APIKey
-	expires time.Time
-}
-
-// APIKeyRepository provides CRUD operations for API keys with an in-memory cache.
+// APIKeyRepository provides CRUD operations for API keys. Authentication reads
+// are deliberately uncached so revocation is immediately visible to every API
+// replica.
 type APIKeyRepository struct {
-	pool  *pgxpool.Pool
-	cache map[string]*cacheEntry
-	mu    sync.RWMutex
+	pool *pgxpool.Pool
 }
 
 // NewAPIKeyRepository creates a new APIKeyRepository.
 func NewAPIKeyRepository(pool *pgxpool.Pool) *APIKeyRepository {
-	return &APIKeyRepository{
-		pool:  pool,
-		cache: make(map[string]*cacheEntry),
-	}
+	return &APIKeyRepository{pool: pool}
 }
 
 // Create generates a new API key, stores the hash and prefix, and returns the API key and plaintext key.
@@ -74,17 +69,8 @@ func (r *APIKeyRepository) Create(ctx context.Context, workspaceID uuid.UUID, na
 	return &apiKey, plaintext, nil
 }
 
-// GetByPrefix looks up an API key by its prefix, checking the in-memory cache first.
+// GetByPrefix looks up a currently active API key by prefix.
 func (r *APIKeyRepository) GetByPrefix(ctx context.Context, prefix string) (*APIKey, error) {
-	// Check cache
-	r.mu.RLock()
-	if entry, ok := r.cache[prefix]; ok && time.Now().Before(entry.expires) {
-		r.mu.RUnlock()
-		return entry.value, nil
-	}
-	r.mu.RUnlock()
-
-	// Query DB
 	var apiKey APIKey
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, workspace_id, key_prefix, key_hash, name, revoked_at, key_id, key_version, created_at
@@ -95,34 +81,79 @@ func (r *APIKeyRepository) GetByPrefix(ctx context.Context, prefix string) (*API
 	if err != nil {
 		return nil, err
 	}
-
-	// Store in cache with 5-minute TTL
-	r.mu.Lock()
-	r.cache[prefix] = &cacheEntry{
-		value:   &apiKey,
-		expires: time.Now().Add(5 * time.Minute),
-	}
-	r.mu.Unlock()
-
 	return &apiKey, nil
 }
 
-// Revoke marks an API key as revoked and invalidates the cache entry.
+// FindActiveCandidates returns every active key whose stored legacy or current
+// prefix can match the supplied plaintext. The caller must constant-time verify
+// the complete hash; returning all candidates keeps legacy 32-bit prefix
+// collisions from disabling a valid credential.
+func (r *APIKeyRepository) FindActiveCandidates(
+	ctx context.Context,
+	plaintext string,
+) ([]APIKey, error) {
+	if len(plaintext) < 8 {
+		return nil, nil
+	}
+	prefixes := []string{plaintext[:8]}
+	if len(plaintext) >= crypto.APIKeyPrefixLength {
+		current := plaintext[:crypto.APIKeyPrefixLength]
+		if current != prefixes[0] {
+			prefixes = append(prefixes, current)
+		}
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, workspace_id, key_prefix, key_hash, name, revoked_at, key_id, key_version, created_at
+		FROM api_keys
+		WHERE key_prefix = ANY($1)
+		  AND revoked_at IS NULL
+	`, prefixes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var candidates []APIKey
+	for rows.Next() {
+		var apiKey APIKey
+		if err := rows.Scan(
+			&apiKey.ID,
+			&apiKey.WorkspaceID,
+			&apiKey.KeyPrefix,
+			&apiKey.KeyHash,
+			&apiKey.Name,
+			&apiKey.RevokedAt,
+			&apiKey.KeyID,
+			&apiKey.KeyVersion,
+			&apiKey.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, apiKey)
+	}
+	return candidates, rows.Err()
+}
+
+// Revoke marks an API key as revoked.
 func (r *APIKeyRepository) Revoke(ctx context.Context, id uuid.UUID) error {
-	var prefix string
-	err := r.pool.QueryRow(ctx,
-		`UPDATE api_keys SET revoked_at = now() WHERE id = $1 RETURNING key_prefix`,
-		id,
-	).Scan(&prefix)
+	return r.RevokeForWorkspace(ctx, uuid.Nil, id)
+}
+
+func (r *APIKeyRepository) RevokeForWorkspace(ctx context.Context, workspaceID, id uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE api_keys
+		 SET revoked_at = now()
+		 WHERE id = $1
+		   AND ($2::uuid IS NULL OR workspace_id = $2)`,
+		id, nullableUUID(workspaceID),
+	)
 	if err != nil {
 		return err
 	}
-
-	// Invalidate cache
-	r.mu.Lock()
-	delete(r.cache, prefix)
-	r.mu.Unlock()
-
+	if tag.RowsAffected() != 1 {
+		return ErrAPIKeyNotFound
+	}
 	return nil
 }
 
@@ -152,14 +183,23 @@ func (r *APIKeyRepository) ListByWorkspace(ctx context.Context, workspaceID uuid
 
 // GetByID retrieves an API key by ID.
 func (r *APIKeyRepository) GetByID(ctx context.Context, id uuid.UUID) (*APIKey, error) {
+	return r.GetByIDForWorkspace(ctx, uuid.Nil, id)
+}
+
+func (r *APIKeyRepository) GetByIDForWorkspace(ctx context.Context, workspaceID, id uuid.UUID) (*APIKey, error) {
 	var apiKey APIKey
 	err := r.pool.QueryRow(ctx,
 		`SELECT id, workspace_id, key_prefix, key_hash, name, revoked_at, key_id, key_version, created_at
-		 FROM api_keys WHERE id = $1`,
-		id,
+		 FROM api_keys
+		 WHERE id = $1
+		   AND ($2::uuid IS NULL OR workspace_id = $2)`,
+		id, nullableUUID(workspaceID),
 	).Scan(&apiKey.ID, &apiKey.WorkspaceID, &apiKey.KeyPrefix, &apiKey.KeyHash,
 		&apiKey.Name, &apiKey.RevokedAt, &apiKey.KeyID, &apiKey.KeyVersion, &apiKey.CreatedAt)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrAPIKeyNotFound
+		}
 		return nil, err
 	}
 	return &apiKey, nil

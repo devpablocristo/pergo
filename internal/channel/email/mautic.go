@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/pablojhp.pergo/internal/channel"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
 )
 
 // MauticConfig holds configuration for Mautic REST API integration.
@@ -68,7 +69,7 @@ func (m *MauticProvider) Send(ctx context.Context, msg *EmailMessage) (string, e
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("failed to create Mautic request: %w", err)
+		return "", channel.NewTerminalError(errors.New("failed to create Mautic request"))
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -78,14 +79,16 @@ func (m *MauticProvider) Send(ctx context.Context, msg *EmailMessage) (string, e
 
 	resp, err := m.config.HTTPClient.Do(req)
 	if err != nil {
-		return "", channel.NewUncertainError(fmt.Errorf("mautic transport response lost: %w", err))
+		return "", channel.NewUncertainError(errors.New("mautic transport response lost"))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("mautic API returned status %d: %s", resp.StatusCode, string(respBody))
+	_, readErr := httpresponse.Read(resp)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if readErr != nil {
+			return "", channel.NewUncertainError(errors.New("mautic response body is invalid"))
+		}
+		return providerMsgID, nil
 	}
-
-	return providerMsgID, nil
+	return "", classifyEmailProviderHTTPStatus("mautic", resp.StatusCode)
 }

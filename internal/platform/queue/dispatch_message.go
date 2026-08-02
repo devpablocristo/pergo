@@ -9,6 +9,7 @@ import "time"
 type DispatchMessage interface {
 	Data() []byte
 	Headers() map[string]string
+	DeliveryAttempt() (int, bool)
 	Ack() error
 	NakWithDelay(delay time.Duration) error
 }

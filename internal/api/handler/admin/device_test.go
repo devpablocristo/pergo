@@ -41,6 +41,49 @@ func TestDeviceHandler_GetQR_MissingPhone(t *testing.T) {
 	}
 }
 
+func TestDeviceHandler_WABARequiresStrongPersistedWebhookSecrets(t *testing.T) {
+	base := url.Values{
+		"name":            {"WABA Secure"},
+		"channel":         {"whatsapp_cloud"},
+		"phone_number_id": {"phone-id"},
+		"waba_account_id": {"waba-id"},
+		"token":           {"meta-access-token"},
+		"verify_token":    {"f6H1j9L2p4Q8r3V7x5Z0m2N6c9B1d4K8"},
+		"app_secret":      {"meta-app-secret"},
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(url.Values)
+	}{
+		{name: "missing verify token", mutate: func(v url.Values) { v.Del("verify_token") }},
+		{name: "short verify token", mutate: func(v url.Values) { v.Set("verify_token", "too-short") }},
+		{name: "predictable verify token", mutate: func(v url.Values) {
+			v.Set("verify_token", "pergo_verify_token_"+uuid.New().String())
+		}},
+		{name: "missing app secret", mutate: func(v url.Values) { v.Del("app_secret") }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values := make(url.Values, len(base))
+			for key, value := range base {
+				values[key] = append([]string(nil), value...)
+			}
+			tt.mutate(values)
+
+			h := &admin.DeviceHandler{}
+			_, c, rec := deviceFormRequest(http.MethodPost, "/admin/devices/create", values, uuid.New())
+			if err := h.Create(c); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+			}
+		})
+	}
+}
+
 // TestDeviceHandler_DatabaseFlows runs integration tests against real PostgreSQL.
 func TestDeviceHandler_DatabaseFlows(t *testing.T) {
 	dsn := os.Getenv("PERGO_DATABASE_URL")
@@ -206,9 +249,10 @@ func TestDeviceHandler_StartPairing_LimitExceeded(t *testing.T) {
 	)
 
 	h := &admin.DeviceHandler{
-		Connections: repo,
-		Sessions:    registry,
-		Manager:     manager,
+		Connections:           repo,
+		Sessions:              registry,
+		Manager:               manager,
+		SessionControlEnabled: true,
 	}
 
 	e := echo.New()
@@ -230,6 +274,40 @@ func TestDeviceHandler_StartPairing_LimitExceeded(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "maximum active WhatsApp connections limit exceeded") {
 		t.Errorf("expected body to contain limit exceeded message, got: %s", rec.Body.String())
+	}
+}
+
+func TestDeviceHandlerSeparatedAPIRejectsWhatsAppWebPairingAfterStartup(t *testing.T) {
+	handler := &admin.DeviceHandler{
+		// Manager deliberately remains nil: a separated API process must never
+		// create or own a WhatsApp Web session in its local memory.
+		SessionControlEnabled: false,
+	}
+	e := echo.New()
+
+	for attempt := 0; attempt < 2; attempt++ {
+		values := url.Values{"phone": {"5511999990001"}}
+		req := httptest.NewRequest(http.MethodPost, "/admin/devices/pair", strings.NewReader(values.Encode()))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+
+		if err := handler.StartPairing(c); err != nil {
+			t.Fatalf("attempt %d StartPairing: %v", attempt, err)
+		}
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, rec.Code, http.StatusServiceUnavailable)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices/qr?phone=5511999990001", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	if err := handler.GetQR(c); err != nil {
+		t.Fatalf("GetQR: %v", err)
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GetQR status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -476,7 +554,7 @@ func TestDeviceHandler_WhatsAppMockPairForm(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/admin/devices/pair-form", nil)
 			rec := httptest.NewRecorder()
 			c := e.NewContext(req, rec)
-			h := &admin.DeviceHandler{WhatsAppMockEnabled: tt.enabled}
+			h := &admin.DeviceHandler{SessionControlEnabled: true, WhatsAppMockEnabled: tt.enabled}
 
 			if err := h.PairForm(c); err != nil {
 				t.Fatalf("PairForm: %v", err)
@@ -486,5 +564,23 @@ func TestDeviceHandler_WhatsAppMockPairForm(t *testing.T) {
 				t.Fatalf("mock option present = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDeviceHandlerPairFormHidesWhatsAppWebWhenWorkerOwnsSessions(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/admin/devices/pair-form", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	handler := &admin.DeviceHandler{SessionControlEnabled: false}
+
+	if err := handler.PairForm(c); err != nil {
+		t.Fatalf("PairForm: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), `<option value="whatsapp">`) {
+		t.Fatal("separated API exposed WhatsApp Web pairing option")
+	}
+	if !strings.Contains(rec.Body.String(), `<option value="whatsapp_cloud">`) {
+		t.Fatal("WhatsApp Cloud option must remain available")
 	}
 }

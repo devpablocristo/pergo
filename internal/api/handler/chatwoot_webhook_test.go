@@ -3,7 +3,6 @@ package handler_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -107,7 +106,8 @@ func TestChatwootWebhookAuth(t *testing.T) {
 		e.Use(middleware.AuthMiddleware(apiKeyRepo))
 		e.POST("/api/integrations/chatwoot", h.Handle)
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/chatwoot?token=%s", rawKey), strings.NewReader(`{}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		rec := httptest.NewRecorder()
 
 		e.ServeHTTP(rec, req)
@@ -122,7 +122,8 @@ func TestChatwootWebhookAuth(t *testing.T) {
 		e.Use(middleware.AuthMiddleware(apiKeyRepo))
 		e.POST("/api/integrations/chatwoot", h.Handle)
 
-		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot?token=invalidkey12345", nil)
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot", nil)
+		req.Header.Set("Authorization", "Bearer invalidkey12345")
 		rec := httptest.NewRecorder()
 
 		e.ServeHTTP(rec, req)
@@ -231,7 +232,8 @@ func TestChatwootWebhookHandler_Integration(t *testing.T) {
 			}
 		}`
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/chatwoot?token=%s", rawKey), strings.NewReader(payload))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot", strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -260,7 +262,8 @@ func TestChatwootWebhookHandler_Integration(t *testing.T) {
 			}
 		}`
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/chatwoot?token=%s", rawKey), strings.NewReader(payload))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot", strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 
@@ -291,7 +294,8 @@ func TestChatwootWebhookHandler_Integration(t *testing.T) {
 			}
 		}`
 
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/integrations/chatwoot?token=%s", rawKey), strings.NewReader(payload))
+		req := httptest.NewRequest(http.MethodPost, "/api/integrations/chatwoot", strings.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+rawKey)
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
 

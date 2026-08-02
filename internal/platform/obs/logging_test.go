@@ -32,11 +32,13 @@ func TestJSONLoggerRedactsSensitiveAttributes(t *testing.T) {
 			"provider",
 			"phone_number",
 			recipient,
+			"phone_number_id",
+			"meta-phone-id-sensitive",
 		),
 	)
 
 	logged := output.String()
-	for _, forbidden := range []string{recipient, body, token} {
+	for _, forbidden := range []string{recipient, body, token, "meta-phone-id-sensitive"} {
 		if strings.Contains(logged, forbidden) {
 			t.Fatalf("sensitive marker leaked in log: %s", logged)
 		}
@@ -44,7 +46,7 @@ func TestJSONLoggerRedactsSensitiveAttributes(t *testing.T) {
 	if !strings.Contains(logged, traceID) {
 		t.Fatalf("operational trace ID was removed: %s", logged)
 	}
-	if strings.Count(logged, RedactedValue) != 4 {
+	if strings.Count(logged, RedactedValue) != 5 {
 		t.Fatalf("redaction count=%d log=%s", strings.Count(logged, RedactedValue), logged)
 	}
 }

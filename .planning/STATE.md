@@ -5,9 +5,9 @@ milestone_name: Email Channels & Tracking Engine
 current_phase: 28
 status: Milestone v1.5 complete
 stopped_at: Phase 28, Plan 02 executed
-last_updated: "2026-08-01T07:59:07-03:00"
-last_activity: 2026-08-01
-last_activity_desc: "Completed quick task 260801-a1t: durable message idempotency"
+last_updated: "2026-08-02T00:04:00-03:00"
+last_activity: 2026-08-02
+last_activity_desc: "Completed reviewed quick task 260801-vxo: PerGo Cloud runtime hardening and production corrections"
 progress:
   total_phases: 3
   completed_phases: 3
@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-06-25)
 Phase: Milestone v1.4 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-08-01 — Completed quick task 260801-a1t: durable message idempotency
+Last activity: 2026-08-02 — Completed reviewed quick task 260801-vxo: PerGo Cloud runtime hardening and production corrections
 
 ## Performance Metrics
 
@@ -107,6 +107,9 @@ Recent decisions affecting current work:
 - [Quick 260801-a1t]: Message ingestion uses a workspace-scoped PostgreSQL
   ledger and a 24-hour JetStream duplicate window; this is not a
   provider-level exactly-once claim.
+- [Quick 260801-vxo]: Production uses separate API, webhook, worker and
+  migration profiles; media remains disabled until a real S3 adapter replaces
+  the repository's in-memory AWS SDK substitute.
 
 ### Pending Todos
 
@@ -169,12 +172,13 @@ Items acknowledged and carried forward from previous milestone close:
 | 260720-fs6 | 2026-07-20 | fix 25-01-PLAN.md frontmatter traceability gap | complete ✓ |
 | 260731-atf | 2026-07-31 | add-an-opt-in-local-whatsapp-mock-channel | complete ✓ |
 | 260801-a1t | 2026-08-01 | make-pergo-message-ingestion-durably-idempotent | complete ✓ |
+| 260801-vxo | 2026-08-02 | harden-pergo-runtime-profiles-webhooks-k | complete ✓ |
 
 ## Session Continuity
 
-Last session: 2026-08-01T07:59:07-03:00
-Stopped at: Quick task 260801-a1t verified and ready for review
-Resume file: .planning/quick/260801-a1t-make-pergo-message-ingestion-durably-ide/260801-a1t-SUMMARY.md
+Last session: 2026-08-02T00:04:00-03:00
+Stopped at: Quick task 260801-vxo corrections verified after independent NO-GO
+Resume file: .planning/quick/260801-vxo-harden-pergo-runtime-profiles-webhooks-k/260801-vxo-SUMMARY.md
 
 ## Operator Next Steps
 

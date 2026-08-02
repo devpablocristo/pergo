@@ -90,6 +90,41 @@ func TestMessageIngressLedgerClaimReplayAndMismatch(t *testing.T) {
 	}
 }
 
+func TestMessageIngressLedgerScopesTraceIdentityByWorkspace(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+
+	ctx := context.Background()
+	wsRepo := NewWorkspaceRepository(pool)
+	firstWorkspace, err := wsRepo.Create(ctx, "ingress_trace_a_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create first workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, firstWorkspace.ID) }()
+	secondWorkspace, err := wsRepo.Create(ctx, "ingress_trace_b_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create second workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, secondWorkspace.ID) }()
+
+	repo := NewMessageIngressLedgerRepository(pool)
+	traceID := "customer-selected-trace"
+	hash := sha256.Sum256([]byte("same-payload"))
+	for _, workspaceID := range []uuid.UUID{firstWorkspace.ID, secondWorkspace.ID} {
+		if _, _, _, _, replay, _, err := repo.Claim(
+			ctx,
+			workspaceID,
+			"same-idempotency-key",
+			hash,
+			traceID,
+			uuid.New(),
+			time.Second,
+		); err != nil || replay {
+			t.Fatalf("workspace %s claim replay=%v err=%v", workspaceID, replay, err)
+		}
+	}
+}
+
 func TestMessageIngressLedgerConcurrentClaimHasOneOwner(t *testing.T) {
 	pool := getTestPool(t)
 	defer pool.Close()
@@ -173,20 +208,27 @@ func TestMessageIngressLedgerExpiredLeaseUsesFencing(t *testing.T) {
 	receipt := uuid.New()
 
 	_, _, oldToken, oldGeneration, _, _, err := repo.Claim(
-		ctx, ws.ID, key, hash, traceID, receipt, 30*time.Millisecond,
+		ctx, ws.ID, key, hash, traceID, receipt, 2*time.Second,
 	)
 	if err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
 
 	_, _, _, _, _, retryAfter, err := repo.Claim(
-		ctx, ws.ID, key, hash, traceID, receipt, 30*time.Millisecond,
+		ctx, ws.ID, key, hash, traceID, receipt, 2*time.Second,
 	)
 	if !errors.Is(err, ErrIngressClaimActive) || retryAfter <= 0 {
 		t.Fatalf("active claim err=%v retry_after=%s", err, retryAfter)
 	}
 
-	time.Sleep(60 * time.Millisecond)
+	if _, err := pool.Exec(ctx, `
+		UPDATE message_ingress_ledger
+		SET claim_expires_at = clock_timestamp() - interval '1 second'
+		WHERE workspace_id = $1
+		  AND idempotency_key = $2
+	`, ws.ID, key); err != nil {
+		t.Fatalf("expire claim: %v", err)
+	}
 	recoveredReceipt, _, newToken, newGeneration, replay, _, err := repo.Claim(
 		ctx, ws.ID, key, hash, traceID, receipt, time.Second,
 	)

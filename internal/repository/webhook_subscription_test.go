@@ -153,3 +153,108 @@ func TestWebhookSubscriptionRepository(t *testing.T) {
 		t.Errorf("expected ErrWebhookSubscriptionNotFound, got: %v", err)
 	}
 }
+
+func TestWebhookSubscriptionMutationIsWorkspaceScoped(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+
+	ctx := context.Background()
+	enc, err := crypto.NewEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	wsRepo := NewWorkspaceRepository(pool)
+	owner, err := wsRepo.Create(ctx, "webhook_owner_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, owner.ID) }()
+	attacker, err := wsRepo.Create(ctx, "webhook_attacker_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create attacker: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(ctx, attacker.ID) }()
+
+	repo := NewWebhookSubscriptionRepository(pool, enc)
+	sub, err := repo.Create(
+		ctx,
+		owner.ID,
+		"https://hooks.example.com/pergo",
+		[]string{"message.sent"},
+		[]byte("0123456789abcdef0123456789abcdef"),
+	)
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	if _, err := repo.GetForWorkspace(ctx, attacker.ID, sub.ID); !errors.Is(err, ErrWebhookSubscriptionNotFound) {
+		t.Fatalf("cross-workspace read error=%v", err)
+	}
+	if err := repo.UpdateForWorkspace(
+		ctx,
+		attacker.ID,
+		sub.ID,
+		"https://attacker.example/hook",
+		[]string{"*"},
+		false,
+		nil,
+	); !errors.Is(err, ErrWebhookSubscriptionNotFound) {
+		t.Fatalf("cross-workspace update error=%v", err)
+	}
+	if err := repo.DeleteForWorkspace(ctx, attacker.ID, sub.ID); !errors.Is(err, ErrWebhookSubscriptionNotFound) {
+		t.Fatalf("cross-workspace delete error=%v", err)
+	}
+	stored, err := repo.GetForWorkspace(ctx, owner.ID, sub.ID)
+	if err != nil {
+		t.Fatalf("owner read: %v", err)
+	}
+	if !stored.Active || stored.URL != "https://hooks.example.com/pergo" {
+		t.Fatalf("cross-workspace mutation changed subscription: %+v", stored)
+	}
+}
+
+func TestWebhookSubscriptionSecurityGateRejectsLegacyUnsafeActiveRows(t *testing.T) {
+	pool := getTestPool(t)
+	defer pool.Close()
+	ctx := context.Background()
+
+	enc, err := crypto.NewEncryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatalf("encryptor: %v", err)
+	}
+	wsRepo := NewWorkspaceRepository(pool)
+	ws, err := wsRepo.Create(ctx, "webhook_gate_"+uuid.NewString())
+	if err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	defer func() { _ = wsRepo.Delete(context.Background(), ws.ID) }()
+
+	repo := NewWebhookSubscriptionRepository(pool, enc)
+	sub, err := repo.Create(
+		ctx,
+		ws.ID,
+		"https://hooks.example.com/pergo",
+		[]string{"*"},
+		[]byte("legacy-short"),
+	)
+	if err != nil {
+		t.Fatalf("create weak legacy subscription: %v", err)
+	}
+	if err := repo.RequireSecureActive(ctx); err == nil {
+		t.Fatal("security gate accepted a short signing secret")
+	}
+
+	strong := []byte("0123456789abcdef0123456789abcdef")
+	if err := repo.Update(ctx, sub.ID, "http://hooks.example.com/pergo", []string{"*"}, true, strong); err != nil {
+		t.Fatalf("update legacy subscription: %v", err)
+	}
+	if err := repo.RequireSecureActive(ctx); err == nil {
+		t.Fatal("security gate accepted a plaintext HTTP destination")
+	}
+
+	if err := repo.Update(ctx, sub.ID, "https://hooks.example.com/pergo", []string{"*"}, true, strong); err != nil {
+		t.Fatalf("secure subscription update: %v", err)
+	}
+	if err := repo.RequireSecureActive(ctx); err != nil {
+		t.Fatalf("security gate rejected secure active subscription: %v", err)
+	}
+}

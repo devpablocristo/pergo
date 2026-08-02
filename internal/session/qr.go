@@ -58,6 +58,18 @@ var ErrMaxConnectionsExceeded = errors.New("maximum active WhatsApp connections 
 //
 // Note: per whatsmeow API contract, GetQRChannel is called before Connect.
 func (m *Manager) StartPairing(ctx context.Context, workspaceID uuid.UUID, phone string, existingConnID *uuid.UUID, proxyURL string) (<-chan QRPairingEvent, error) {
+	pairingCtx, finishPairing, ok := m.beginProducer(ctx)
+	if !ok {
+		return nil, ErrManagerStopping
+	}
+	ctx = pairingCtx
+	transferred := false
+	defer func() {
+		if !transferred {
+			finishPairing()
+		}
+	}()
+
 	// Read max connections limit from environment (default: 5)
 	maxLimit := 5
 	if limitStr := os.Getenv("PERGO_MAX_WHATSAPP_CONNECTIONS"); limitStr != "" {
@@ -117,7 +129,9 @@ func (m *Manager) StartPairing(ctx context.Context, workspaceID uuid.UUID, phone
 
 	out := make(chan QRPairingEvent, 8)
 
+	transferred = true
 	go func() {
+		defer finishPairing()
 		defer close(out)
 
 		timer := time.NewTimer(pairingTimeout)
@@ -233,8 +247,14 @@ func (m *Manager) onPairingSuccess(ctx context.Context, wc whatsapp.Client, work
 		}
 	}
 
-	// Register active session.
-	sessionCtx, cancel := context.WithCancel(context.Background())
+	// Register active session against the manager lifecycle so shutdown can
+	// cancel and await its final persistence before dependencies close.
+	sessionBaseCtx, finishSession, ok := m.beginProducer(context.Background())
+	if !ok {
+		wc.Disconnect()
+		return ErrManagerStopping
+	}
+	sessionCtx, cancel := context.WithCancel(sessionBaseCtx)
 	sess := &Session{
 		DeviceID: dID.String(),
 		JID:      jid,
@@ -245,8 +265,13 @@ func (m *Manager) onPairingSuccess(ctx context.Context, wc whatsapp.Client, work
 
 	// Keep the client running in background.
 	go func() {
-		_ = wc.Run(sessionCtx)
-		_ = m.repo.UpdateStatus(context.Background(), dID, string(DeviceStatusDisconnected))
+		defer finishSession()
+		// Pairing already connected the client after GetQRChannel. Calling Run
+		// here would connect a second time and orphan the first socket.
+		wc.Wait(sessionCtx)
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), statusUpdateTimeout)
+		defer cleanupCancel()
+		_ = m.repo.UpdateStatus(cleanupCtx, dID, string(DeviceStatusDisconnected))
 		m.registry.Remove(jid)
 	}()
 

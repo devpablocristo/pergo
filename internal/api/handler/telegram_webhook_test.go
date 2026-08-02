@@ -110,7 +110,7 @@ func TestTelegramWebhookHandler(t *testing.T) {
 	// Setup Echo
 	e := echo.New()
 	dedupRepo := repository.NewInboundDedupRepository(pool)
-	mediaEngine := media.NewDefaultEngine(nil)
+	mediaEngine := media.NewDefaultEngine(storage.NewDisabledS3Client())
 	dispatchRepo := repository.NewMessageDispatchRepository(pool)
 	inboundProcessor := inbound.NewInboundProcessor(dedupRepo, wsRepo, mediaEngine, nil, nil, sessRepo, contactRepo, dispatchRepo, nil)
 	h := NewTelegramWebhookHandler(connRepo, inboundProcessor, mediaEngine)
@@ -181,6 +181,94 @@ func TestTelegramWebhookHandler(t *testing.T) {
 		}
 		if time.Since(sess.LastInboundAt) > 10*time.Second {
 			t.Errorf("expected LastInboundAt to be recent, got: %v", sess.LastInboundAt)
+		}
+	})
+
+	t.Run("Media disabled returns retry before Telegram network call", func(t *testing.T) {
+		var calls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+		h.SetBaseURL(server.URL)
+
+		body := `{"update_id":1002,"message":{"message_id":1002,"chat":{"id":987654321},"photo":[{"file_id":"must-not-fetch","file_size":5000}]}}`
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/webhooks/telegram/%s", ws.ID), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "my-secret-telegram-webhook-token")
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.SetPathValues(echo.PathValues{{Name: "workspace_id", Value: ws.ID.String()}})
+
+		if err := h.Handle(c); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", rec.Code)
+		}
+		if rec.Header().Get("Retry-After") != "300" {
+			t.Fatalf("Retry-After = %q, want 300", rec.Header().Get("Retry-After"))
+		}
+		if calls != 0 {
+			t.Fatalf("disabled media made %d Telegram network calls", calls)
+		}
+	})
+
+	t.Run("Selects the matching bot among multiple Telegram connections", func(t *testing.T) {
+		secondConfig, _ := json.Marshal(map[string]string{
+			"token":        "second-token",
+			"secret_token": "second-secret-token",
+			"bot_username": "@secondbot",
+		})
+		second := &repository.Connection{
+			ID:             uuid.New(),
+			WorkspaceID:    ws.ID,
+			Name:           "Second bot",
+			Channel:        "telegram",
+			SenderIdentity: "@secondbot",
+			Credentials:    secondConfig,
+		}
+		if err := connRepo.Create(ctx, second); err != nil {
+			t.Fatalf("create second connection: %v", err)
+		}
+
+		body := `{"update_id":1003,"message":{"message_id":1003,"chat":{"id":222333444},"text":"second"}}`
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/webhooks/telegram/%s", ws.ID), strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "second-secret-token")
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.SetPathValues(echo.PathValues{{Name: "workspace_id", Value: ws.ID.String()}})
+
+		if err := h.Handle(c); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if _, err := sessRepo.Get(ctx, ws.ID, "222333444", "telegram", "@secondbot"); err != nil {
+			t.Fatalf("second bot session was not persisted: %v", err)
+		}
+
+		duplicate := *second
+		duplicate.ID = uuid.New()
+		duplicate.Name = "Duplicate secret"
+		duplicate.SenderIdentity = "@duplicate"
+		if err := connRepo.Create(ctx, &duplicate); err != nil {
+			t.Fatalf("create duplicate-secret connection: %v", err)
+		}
+
+		req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/webhooks/telegram/%s", ws.ID), strings.NewReader(body))
+		req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "second-secret-token")
+		rec = httptest.NewRecorder()
+		c = e.NewContext(req, rec)
+		c.SetPathValues(echo.PathValues{{Name: "workspace_id", Value: ws.ID.String()}})
+		if err := h.Handle(c); err != nil {
+			t.Fatalf("Handle duplicate: %v", err)
+		}
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("duplicate secret status = %d, want 403", rec.Code)
 		}
 	})
 

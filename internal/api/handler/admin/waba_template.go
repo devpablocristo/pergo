@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 
 	mw "github.com/pablojhp.pergo/internal/api/middleware"
+	"github.com/pablojhp.pergo/internal/platform/httpresponse"
+	"github.com/pablojhp.pergo/internal/platform/metaapi"
 	"github.com/pablojhp.pergo/internal/repository"
 	"github.com/pablojhp.pergo/templates/pages"
 )
@@ -29,7 +30,7 @@ func NewWABATemplateHandler(repo *repository.WABATemplateRepository, connections
 		Repo:            repo,
 		ConnectionsRepo: connectionsRepo,
 		Client:          http.DefaultClient,
-		BaseURL:         "https://graph.facebook.com/v18.0",
+		BaseURL:         metaapi.BaseURL(metaapi.DefaultVersion),
 	}
 }
 
@@ -149,13 +150,16 @@ func (h *WABATemplateHandler) Create(c *echo.Context) error {
 
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return c.String(http.StatusBadGateway, "failed to communicate with Meta API: "+err.Error())
+		return c.String(http.StatusBadGateway, "failed to communicate with Meta API")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		return c.String(http.StatusBadGateway, "invalid response from Meta API")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.String(resp.StatusCode, "Meta API returned error: "+string(respBytes))
+		return c.String(http.StatusBadGateway, "Meta API rejected the template request")
 	}
 
 	type metaResponse struct {
@@ -165,7 +169,7 @@ func (h *WABATemplateHandler) Create(c *echo.Context) error {
 	}
 	var metaResp metaResponse
 	if err := json.Unmarshal(respBytes, &metaResp); err != nil || metaResp.ID == "" {
-		return c.String(http.StatusInternalServerError, "failed to parse Meta API response")
+		return c.String(http.StatusBadGateway, "invalid response from Meta API")
 	}
 
 	status := metaResp.Status
@@ -259,13 +263,16 @@ func (h *WABATemplateHandler) Sync(c *echo.Context) error {
 
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return c.String(http.StatusBadGateway, "failed to connect to Meta API: "+err.Error())
+		return c.String(http.StatusBadGateway, "failed to connect to Meta API")
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, _ := io.ReadAll(resp.Body)
+	respBytes, readErr := httpresponse.Read(resp)
+	if readErr != nil {
+		return c.String(http.StatusBadGateway, "invalid response from Meta API")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return c.String(resp.StatusCode, "Meta API returned error: "+string(respBytes))
+		return c.String(http.StatusBadGateway, "Meta API rejected the template status request")
 	}
 
 	type metaSyncResponse struct {
@@ -273,7 +280,7 @@ func (h *WABATemplateHandler) Sync(c *echo.Context) error {
 	}
 	var metaResp metaSyncResponse
 	if err := json.Unmarshal(respBytes, &metaResp); err != nil || metaResp.Status == "" {
-		return c.String(http.StatusInternalServerError, "failed to parse Meta status response")
+		return c.String(http.StatusBadGateway, "invalid response from Meta API")
 	}
 
 	// Update locally

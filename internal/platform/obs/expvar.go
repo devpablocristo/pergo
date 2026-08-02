@@ -2,6 +2,6 @@ package obs
 
 import "expvar"
 
-// AuditDrops is a package-level expvar counter for audit channel overflows.
-// Increment this when the audit event channel is full and an event is dropped.
+// AuditDrops counts audit events lost to queue overflow, persistence failure,
+// or forced shutdown cancellation.
 var AuditDrops = expvar.NewInt("audit_drops")

@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pablojhp.pergo/internal/inbound"
 	"github.com/pablojhp.pergo/internal/media"
 	"github.com/pablojhp.pergo/internal/platform/audit"
@@ -40,15 +39,8 @@ func TestWABAWebhook_Inbound(t *testing.T) {
 	nc := connectNATS(t)
 	ctx := context.Background()
 
-	// Setup NATS Stream
-	js, err := jetstream.New(nc)
-	if err == nil {
-		_ = js.DeleteStream(ctx, "INBOUND")
-	}
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     "INBOUND",
-		Subjects: []string{"inbound.events.>"},
-	})
+	// Provision the same versioned, workspace-scoped stream used by runtime.
+	_, err := queue.EnsureInboundStream(ctx, nc)
 	if err != nil {
 		t.Fatalf("failed to create NATS stream: %v", err)
 	}
